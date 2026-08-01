@@ -10,6 +10,12 @@ CPU VRM voltage, current, power, and temperature on Linux — via the NCT6687 **
 
 Other MSI boards with the same EC + VR wiring may work. Confirm `0xC0` with the [userspace reader](#userspace-reader-optional) before leaving `vrm=1` enabled. Protocol details: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
+## How this was found
+
+The NCT **eSIO SMBus** host path (BAR from Super-I/O LDN `0x0B`, window at EC `base+4/+5/+6`, PMBus at `0xC0`, PAGE 0 = CPU / PAGE 1 = GT) makes these registers readable on Linux without the MSI WMI/BIOS mailbox.
+
+This repo is that path turned into a DKMS patch and a small userspace checker. Decode details and what *not* to poke: [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
 ## Disclaimer
 
 Developed with **AI assistance**. Experimental hardware tooling — **no warranty**.
