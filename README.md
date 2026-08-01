@@ -23,9 +23,9 @@ Other MSI boards with the same EC + VR wiring may work. Confirm `0xC0` with the 
 
 ## Background
 
-[HWiNFO](https://www.hwinfo.com/) already shows these VRM sensors on Windows by talking to the Renesas controller through the NCT6687 eSIO SMBus. This repo brings that same access to Linux as a small DKMS patch (plus an optional userspace reader). It is not affiliated with HWiNFO.
+[HWiNFO](https://www.hwinfo.com/) already reads these VRM rails on Windows through the NCT6687 **eSIO SMBus** host — Super-I/O LDN `0x0B` BAR, data window at EC `base+4/+5/+6`, PMBus address `0xC0`, PAGE `0` = CPU Vcore / PAGE `1` = GT/iGPU. The same path works on Linux; MSI’s WMI/BIOS mailbox does not expose this telemetry.
 
-Register-level details: [docs/PROTOCOL.md](docs/PROTOCOL.md).
+This repo turns that into a DKMS patch and an optional userspace reader. Not affiliated with HWiNFO. More detail (and what not to poke): [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Requirements
 
