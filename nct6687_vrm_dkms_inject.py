@@ -190,7 +190,7 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
     if rc != 0:
         raise SystemExit(
             f"modprobe -r nct6687 failed (rc={rc}). "
-            "Stop CoolerControl / module users, then retry. "
+            "Something still holds the module — close hwmon clients and retry. "
             "DKMS is built but the LIVE module was NOT replaced."
         )
     subprocess.check_call(["modprobe", "nct6687", vrm_arg])

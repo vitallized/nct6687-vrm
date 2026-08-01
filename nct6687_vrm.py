@@ -354,19 +354,6 @@ def module_loaded(name: str) -> bool:
     return Path(f"/sys/module/{name}").is_dir()
 
 
-def process_running(name: str) -> bool:
-    for d in Path("/proc").iterdir():
-        if not d.name.isdigit():
-            continue
-        try:
-            comm = (d / "comm").read_text().strip()
-        except OSError:
-            continue
-        if comm == name:
-            return True
-    return False
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--addr", type=lambda x: int(x, 0), default=DEFAULT_ADDR)
@@ -391,7 +378,7 @@ def main() -> int:
     ap.add_argument(
         "--force",
         action="store_true",
-        help="Allow run while nct6687.ko / coolercontrold are active (unsafe race)",
+        help="Allow run while nct6687.ko is loaded (unsafe: races the driver's EC I/O)",
     )
     args = ap.parse_args()
 
@@ -402,15 +389,9 @@ def main() -> int:
         print("Only ports 0/1 are safe on this board", file=sys.stderr)
         return 1
 
-    blockers = []
-    if module_loaded("nct6687"):
-        blockers.append("nct6687.ko is loaded (shares eSIO A24–A26)")
-    if process_running("coolercontrold"):
-        blockers.append("coolercontrold is running")
-    if blockers and not args.force:
-        for b in blockers:
-            print(f"Refusing: {b}", file=sys.stderr)
-        print("Pause CoolerControl / unload nct6687, or pass --force", file=sys.stderr)
+    if module_loaded("nct6687") and not args.force:
+        print("Refusing: nct6687.ko is loaded (shares eSIO base+4..+6)", file=sys.stderr)
+        print("Unload it, or pass --force", file=sys.stderr)
         return 3
 
     base = args.base if args.base is not None else discover_base()

@@ -10,6 +10,6 @@ if [[ ! -f "$INJECT" ]]; then
 	exit 1
 fi
 
-# During pacman: rebuild on disk, do not unload the running module (CoolerControl / fans).
+# During pacman: rebuild on disk, do not unload the running module.
 # Next boot (or manual modprobe) picks up the patched module; modprobe.d sets vrm=1.
 exec /usr/bin/python3 "$INJECT" --reinject --no-reload
