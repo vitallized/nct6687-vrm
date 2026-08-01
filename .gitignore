@@ -11,3 +11,4 @@ modules.order
 *.bak
 *~
 .DS_Store
+.vrm-verify-build-user/

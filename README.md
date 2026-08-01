@@ -72,6 +72,8 @@ sensors
 | `power1_input` | CPU POUT | µW |
 | `temp20_input` | VR temperature | m°C |
 
+Cache defaults to **1 Hz**; polling VRM hwmon faster raises the sample rate down to ~**20 ms**. Fast polling shares `EC_io_lock` with fans/temps (can delay those reads).
+
 GT / iGPU (PMBus PAGE 1), usually idle with a discrete GPU:
 
 ```sh

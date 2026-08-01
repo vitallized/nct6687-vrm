@@ -30,7 +30,10 @@ STRUCT_FIELDS = """
 	bool vrm_enabled;
 	bool vrm_valid;
 	bool vrm_gt_valid;
+	bool vrm_demand;
 	unsigned long vrm_last_updated;
+	unsigned long vrm_last_read;
+	unsigned long vrm_read_gap;
 	long vrm_vout; /* mV */
 	long vrm_vin;  /* mV */
 	long vrm_iout; /* mA */
@@ -55,6 +58,9 @@ VRM_INCLUDE = f"""
 PROBE_ENABLE = """
 	data->vrm_enabled = vrm;
 	data->vrm_last_updated = 0;
+	data->vrm_last_read = 0;
+	data->vrm_read_gap = 0;
+	data->vrm_demand = false;
 	if (data->vrm_enabled)
 		dev_info(dev, "VRM PMBus eSIO sensors enabled (addr=0x%02x vout_exp=%d gt=%d)\\n",
 			 vrm_addr & 0xff, vrm_vout_exp, vrm_gt ? 1 : 0);
