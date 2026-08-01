@@ -1,100 +1,122 @@
 # nct6687-vrm
 
-Linux VRM telemetry (voltage / current / power / temp) for MSI boards that expose a Renesas PMBus controller through the **NCT6687 eSIO SMBus**, the same path HWiNFO uses on Windows.
+CPU VRM voltage, current, power, and temperature on Linux — via the NCT6687 **eSIO SMBus**, the same path HWiNFO uses on Windows.
 
-**Proven on:** MSI MPG Z790 CARBON WIFI (**MS-7D89**), BIOS with NCT6687 EC, CachyOS/Arch + [`nct6687d`](https://github.com/FredrIQ/nct6687d) DKMS.
+| | |
+|--|--|
+| **Proven** | MSI MPG Z790 CARBON WIFI (**MS-7D89**), Renesas multiphase @ PMBus `0xC0` |
+| **Needs** | [`nct6687d`](https://github.com/Fred78290/nct6687d) already providing fans/temps (`nct6687.ko`) |
+| **Adds** | hwmon channels for VRM (optional GT/iGPU page) |
 
-Other MSI Z790 (and similar) boards with the same EC + VR wiring may work; confirm PMBus at `0xC0` before enabling. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Other MSI boards with the same EC + VR wiring may work. Confirm `0xC0` with the [userspace reader](#userspace-reader-optional) before leaving `vrm=1` enabled. Protocol details: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-## AI / safety disclaimer
+## Disclaimer
 
-This project was developed with **AI assistance**. Treat it as experimental hardware tooling:
+Developed with **AI assistance**. Experimental hardware tooling — **no warranty**.
 
-- **No warranty.** Misuse can hang the embedded controller; recovery may need a full power cycle (not just reboot).
-- Review the scripts before running them as root.
-- This **patches out-of-tree DKMS sources** in place. A future `nct6687d` release can break the inject anchors — use the pacman hook or re-run inject after upgrades.
-- Start with `vrm=0`, confirm fans/temps, then enable VRM.
+- Misuse can hang the embedded controller; recovery may need a **full power cycle** (not only a reboot).
+- Review scripts before running as root.
+- Patches **out-of-tree DKMS sources** in place. Upstream `nct6687d` changes can break the inject; re-run after upgrades (or install the pacman hook).
+- Always bring the module up with **`vrm=0` first**, confirm fans/temps, then enable VRM.
 
 ## Requirements
 
-- Linux with root
-- `nct6687d-dkms` / `nct6687d-dkms-git` already providing `nct6687.ko`
-- Kernel headers for your running kernel (DKMS build)
+- Root on Linux
+- `nct6687d-dkms` / `nct6687d-dkms-git` (or equivalent) installed and working
+- Matching kernel headers for DKMS rebuilds
 
-**CoolerControl is not required.** If you use it (or any other hwmon client), stop it before `modprobe -r nct6687` so the module can unload.
+CoolerControl (and similar) is **optional**. If something is using the hwmon device, stop it before `modprobe -r nct6687` so unload succeeds.
 
-## Quick install (DKMS — recommended)
+## Install
 
-From a clone of this repo:
+```sh
+git clone https://github.com/vitallized/nct6687-vrm.git
+cd nct6687-vrm
 
-```fish
-# Optional: only if CoolerControl (or similar) is running
+# 1) Optional — only if CoolerControl (or similar) is running
 sudo systemctl stop coolercontrold
 
+# 2) Compile-check (does not change the live module)
 sudo python3 ./nct6687_vrm_dkms_inject.py --verify-compile
+
+# 3) Patch DKMS sources, rebuild, reload with vrm=0
 sudo python3 ./nct6687_vrm_dkms_inject.py --install
-# Module reloads with vrm=0 — check fans/temps first
 
-sudo modprobe -r nct6687; and sudo modprobe nct6687 vrm=1
+# 4) Confirm fans / board temps still look normal (sensors, CoolerControl, …)
 
-sudo systemctl start coolercontrold   # if you stopped it
+# 5) Enable VRM
+sudo modprobe -r nct6687
+sudo modprobe nct6687 vrm=1
+
+# 6) Optional — restart CoolerControl if you stopped it
+sudo systemctl start coolercontrold
 ```
 
-Check:
+Verify:
 
-```fish
-cat /sys/module/nct6687/parameters/vrm   # expect Y
+```sh
+cat /sys/module/nct6687/parameters/vrm    # Y
 sensors
-# or: ls /sys/class/hwmon/hwmon*/curr1_input
 ```
 
-| hwmon | Meaning |
-|-------|---------|
-| `in20_input` | CPU VOUT (mV) |
-| `in21_input` | CPU VIN (mV) |
-| `curr1_input` | CPU IOUT (mA) |
-| `power1_input` | CPU POUT (µW) |
-| `temp20_input` | VR temp (m°C) |
+### Sensors
 
-GT/iGPU (PAGE 1): `modprobe nct6687 vrm=1 vrm_gt=1` → `in22` / `curr2` / `power2` / `temp21`.
+| Sysfs | Meaning | Unit |
+|-------|---------|------|
+| `in20_input` | CPU VOUT | mV |
+| `in21_input` | CPU VIN | mV |
+| `curr1_input` | CPU IOUT | mA |
+| `power1_input` | CPU POUT | µW |
+| `temp20_input` | VR temperature | m°C |
 
-### Persist across reboot and package updates (Arch)
+GT / iGPU (PMBus PAGE 1), usually idle with a discrete GPU:
 
-```fish
+```sh
+sudo modprobe -r nct6687
+sudo modprobe nct6687 vrm=1 vrm_gt=1
+```
+
+→ `in22` / `in23` / `curr2` / `power2` / `temp21`
+
+### Persist (Arch / CachyOS)
+
+Keeps `vrm=1` across reboot and re-applies the patch when `nct6687d-dkms-git` is upgraded:
+
+```sh
 sudo bash ./pacman-hook/install.sh
 ```
 
-This installs:
+The hook rebuilds on disk during pacman; it does **not** unload the running module mid-transaction. Reboot or reload later to pick up a post-upgrade build.
 
-- `/etc/modprobe.d/nct6687-vrm.conf` → `options nct6687 vrm=1`
-- A pacman hook that re-injects + rebuilds when `nct6687d-dkms-git` is upgraded (does **not** unload the live module mid-transaction; reboot or reload later)
-
-After you change the inject script and pull updates, re-run `pacman-hook/install.sh` so `/usr/local` stays in sync.
+After `git pull` changes to the inject script, re-run `pacman-hook/install.sh` so `/usr/local` stays in sync.
 
 ## Rollback
 
-```fish
-sudo modprobe -r nct6687; and sudo modprobe nct6687 vrm=0
-# full stock sources + rebuild:
+```sh
+# Disable VRM only
+sudo modprobe -r nct6687
+sudo modprobe nct6687 vrm=0
+
+# Restore stock DKMS sources and rebuild
 sudo python3 ./nct6687_vrm_dkms_inject.py --restore --rebuild
-# remove hook / modprobe.d if installed:
+
+# Remove persist bits (if you installed the hook)
 sudo rm -f /etc/pacman.d/hooks/nct6687-vrm-reinject.hook \
-  /etc/modprobe.d/nct6687-vrm.conf \
-  /usr/local/sbin/nct6687-vrm-reinject
+           /etc/modprobe.d/nct6687-vrm.conf \
+           /usr/local/sbin/nct6687-vrm-reinject
 sudo rm -rf /usr/local/lib/nct6687-vrm
 ```
 
 ## Userspace reader (optional)
 
-For a one-shot check **without** patching the kernel module. Prefers `nct6687` unloaded; `--force` races the driver’s EC window.
+One-shot / debug without patching the kernel. Prefer with `nct6687` **unloaded**. `--force` races the driver’s EC window — fine for a quick check, not for continuous use.
 
-```fish
+```sh
 sudo python3 ./nct6687_vrm.py --page 0
-# if nct6687.ko is loaded (not recommended long-term):
-sudo python3 ./nct6687_vrm.py --page 0 --force
+sudo python3 ./nct6687_vrm.py --page 0 --force   # if the module is loaded
 ```
 
-Do **not** use this while the module is loaded with `vrm=1`.
+Do **not** run this while the module has `vrm=1`.
 
 ## License
 
