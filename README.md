@@ -21,11 +21,11 @@ CPU VRM voltage, current, power, and temperature on Linux — via the NCT6687 **
 
 Other MSI boards with the same EC + VR wiring may work. Confirm `0xC0` with the [userspace reader](#userspace-reader-optional) before leaving `vrm=1` enabled. Protocol details: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-## How this was found
+## Background
 
-On Windows, [HWiNFO](https://www.hwinfo.com/) already exposes these VRM rails on MS-7D89. Matching its NCT **eSIO SMBus** host path (BAR from Super-I/O LDN `0x0B`, window at EC `base+4/+5/+6`, PMBus at `0xC0`, PAGE 0 = CPU / PAGE 1 = GT) to Linux made the same registers readable without the MSI WMI/BIOS mailbox dead ends.
+[HWiNFO](https://www.hwinfo.com/) already shows these VRM sensors on Windows by talking to the Renesas controller through the NCT6687 eSIO SMBus. This repo brings that same access to Linux as a small DKMS patch (plus an optional userspace reader). It is not affiliated with HWiNFO.
 
-This repo is that path turned into a DKMS patch and a small userspace checker — not an HWiNFO port. Decode details and what *not* to poke: [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Register-level details: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Requirements
 
