@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.vrm-verify-build/
+*.ko
+*.o
+*.mod
+*.mod.c
+Module.symvers
+modules.order
+*.bin
+*.bak
+*~
+.DS_Store

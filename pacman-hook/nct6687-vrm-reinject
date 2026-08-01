@@ -1,0 +1,15 @@
+#!/bin/bash
+# Pacman PostTransaction helper — re-apply VRM inject after nct6687d-dkms-git updates.
+set -euo pipefail
+
+INJECT=/usr/local/lib/nct6687-vrm/nct6687_vrm_dkms_inject.py
+LOG_TAG=nct6687-vrm-reinject
+
+if [[ ! -f "$INJECT" ]]; then
+	echo "$LOG_TAG: missing $INJECT — re-run pacman-hook/install.sh from this repo" >&2
+	exit 1
+fi
+
+# During pacman: rebuild on disk, do not unload the running module (CoolerControl / fans).
+# Next boot (or manual modprobe) picks up the patched module; modprobe.d sets vrm=1.
+exec /usr/bin/python3 "$INJECT" --reinject --no-reload
