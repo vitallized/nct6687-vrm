@@ -4,7 +4,8 @@
 
 /* NCT6687_VRM_PMBUS_INJECT — eSIO PMBus VRM (MSI MS-7D89 / addr 0xC0) */
 /*
- * Default OFF. update_vrm runs AFTER update_lock is released (own 1Hz cache)
+ * Default OFF. update_vrm runs AFTER update_lock is released (adaptive cache:
+ * 1 Hz background; match VRM sysfs poll rate down to ~20 ms when demanded)
  * and holds only EC_io_lock — same lock as nct6687_read/write.
  */
 static bool vrm;
@@ -270,20 +271,35 @@ static void nct6687_update_vrm(struct nct6687_data *data)
 	u8 cfg_save, baud_save;
 	u8 addr;
 	long vout_mv, vin_mv, iout_ma, pout_uw, temp_mc;
+	unsigned long now, floor, interval;
+	bool demanded;
 
 	if (!data->vrm_enabled)
 		return;
 
 	/*
 	 * Rate-limit even when invalid: a wedged VR/mux must not be hammered at
-	 * hwmon poll rate. Healthy cache: 1 Hz. After failure: retry at ~4 Hz.
+	 * hwmon poll rate. Background / non-VRM paths: 1 Hz. VRM sysfs demand:
+	 * match inter-read gap down to ~20 ms. After failure: retry at ~4 Hz.
 	 */
-	if (data->vrm_last_updated) {
-		unsigned long interval = data->vrm_valid ? HZ : (HZ / 4);
+	demanded = data->vrm_demand;
+	data->vrm_demand = false;
 
-		if (!time_after(jiffies, data->vrm_last_updated + interval))
-			return;
-	}
+	now = jiffies;
+	floor = msecs_to_jiffies(20);
+	if (!floor)
+		floor = 1;
+
+	if (!data->vrm_valid)
+		interval = HZ / 4;
+	else if (demanded && data->vrm_read_gap < HZ)
+		interval = max_t(unsigned long, data->vrm_read_gap, floor);
+	else
+		interval = HZ;
+
+	if (data->vrm_last_updated &&
+	    !time_after(now, data->vrm_last_updated + interval))
+		return;
 
 	addr = (u8)(vrm_addr & 0xff);
 	cfg_save = 0;
@@ -348,9 +364,20 @@ static void nct6687_update_vrm(struct nct6687_data *data)
 	mutex_unlock(&data->EC_io_lock);
 }
 
+static struct nct6687_data *nct_vrm_touch_and_update(struct device *dev)
+{
+	struct nct6687_data *data = dev_get_drvdata(dev);
+	unsigned long now = jiffies;
+
+	data->vrm_read_gap = data->vrm_last_read ? now - data->vrm_last_read : HZ;
+	data->vrm_last_read = now;
+	data->vrm_demand = true;
+	return nct6687_update_device(dev);
+}
+
 static ssize_t show_vrm_vout(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_valid)
 		return -ENODATA;
@@ -359,7 +386,7 @@ static ssize_t show_vrm_vout(struct device *dev, struct device_attribute *attr, 
 
 static ssize_t show_vrm_vin(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_valid)
 		return -ENODATA;
@@ -368,7 +395,7 @@ static ssize_t show_vrm_vin(struct device *dev, struct device_attribute *attr, c
 
 static ssize_t show_vrm_iout(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_valid)
 		return -ENODATA;
@@ -377,7 +404,7 @@ static ssize_t show_vrm_iout(struct device *dev, struct device_attribute *attr, 
 
 static ssize_t show_vrm_pout(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_valid)
 		return -ENODATA;
@@ -386,7 +413,7 @@ static ssize_t show_vrm_pout(struct device *dev, struct device_attribute *attr, 
 
 static ssize_t show_vrm_temp(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_valid)
 		return -ENODATA;
@@ -395,7 +422,7 @@ static ssize_t show_vrm_temp(struct device *dev, struct device_attribute *attr, 
 
 static ssize_t show_vrm_gt_vout(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_gt_valid)
 		return -ENODATA;
@@ -404,7 +431,7 @@ static ssize_t show_vrm_gt_vout(struct device *dev, struct device_attribute *att
 
 static ssize_t show_vrm_gt_vin(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_gt_valid)
 		return -ENODATA;
@@ -413,7 +440,7 @@ static ssize_t show_vrm_gt_vin(struct device *dev, struct device_attribute *attr
 
 static ssize_t show_vrm_gt_iout(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_gt_valid)
 		return -ENODATA;
@@ -422,7 +449,7 @@ static ssize_t show_vrm_gt_iout(struct device *dev, struct device_attribute *att
 
 static ssize_t show_vrm_gt_pout(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_gt_valid)
 		return -ENODATA;
@@ -431,7 +458,7 @@ static ssize_t show_vrm_gt_pout(struct device *dev, struct device_attribute *att
 
 static ssize_t show_vrm_gt_temp(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct nct6687_data *data = nct6687_update_device(dev);
+	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
 
 	if (!data->vrm_gt_valid)
 		return -ENODATA;
