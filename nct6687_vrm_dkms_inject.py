@@ -310,20 +310,28 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
             "Something still holds the module — close hwmon clients and retry. "
             "DKMS is built but the LIVE module was NOT replaced."
         )
-    subprocess.check_call(["modprobe", "nct6687", vrm_arg])
-    vrm_sys = Path("/sys/module/nct6687/parameters/vrm")
-    if not vrm_sys.exists():
-        raise SystemExit(
-            "Reload finished but /sys/module/nct6687/parameters/vrm is missing — "
-            "the live module is still the unpatched build. "
-            "Run: sudo python3 nct6687_vrm_dkms_inject.py --rebuild"
-        )
-    print("Live module param vrm=" + vrm_sys.read_text().strip())
-    if load_vrm:
-        print("Loaded WITH VRM. Rollback: modprobe nct6687 vrm=0")
+    # After --restore the module is stock (no vrm param). Only pass vrm=* when patched.
+    src_text = src.read_text() if src.is_file() else ""
+    patched = MARKER in src_text
+    if patched:
+        subprocess.check_call(["modprobe", "nct6687", vrm_arg])
     else:
-        print("Loaded with vrm=0. Enable later: modprobe -r nct6687 && modprobe nct6687 vrm=1")
-
+        subprocess.check_call(["modprobe", "nct6687"])
+    vrm_sys = Path("/sys/module/nct6687/parameters/vrm")
+    if patched:
+        if not vrm_sys.exists():
+            raise SystemExit(
+                "Reload finished but /sys/module/nct6687/parameters/vrm is missing — "
+                "the live module is still the unpatched build. "
+                "Run: sudo python3 nct6687_vrm_dkms_inject.py --rebuild"
+            )
+        print("Live module param vrm=" + vrm_sys.read_text().strip())
+        if load_vrm:
+            print("Loaded WITH VRM. Rollback: modprobe nct6687 vrm=0")
+        else:
+            print("Loaded with vrm=0. Enable later: modprobe -r nct6687 && modprobe nct6687 vrm=1")
+    else:
+        print("Loaded stock nct6687 (no VRM patch in sources).")
 
 def want_vrm_enabled(cli_enable: bool) -> bool:
     """CLI --enable-vrm wins; else honor /etc/modprobe.d/*nct6687* options."""
