@@ -1,0 +1,12 @@
+# Re-apply eSIO PMBus VRM patch after nct6687d-dkms-git is replaced by pacman.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = nct6687d-dkms-git
+
+[Action]
+Description = Re-inject NCT6687 VRM PMBus patch and rebuild DKMS
+When = PostTransaction
+Exec = /usr/local/sbin/nct6687-vrm-reinject
+Depends = python
