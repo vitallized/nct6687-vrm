@@ -31,7 +31,7 @@ Developed with **AI assistance**. Experimental hardware tooling — **no warrant
 - `nct6687d-dkms` / `nct6687d-dkms-git` (or equivalent) installed and working
 - Matching kernel headers for DKMS rebuilds
 
-CoolerControl (and similar) is **optional**. If something is using the hwmon device, stop it before `modprobe -r nct6687` so unload succeeds.
+`vrm` is a load-time module parameter. Changing it (or picking up a newly built `.ko`) means **unload + reload** `nct6687`. That only fails if something still holds the module (`modprobe -r` errors) — then quit whatever is using the NCT6687 hwmon and retry.
 
 ## Install
 
@@ -39,25 +39,18 @@ CoolerControl (and similar) is **optional**. If something is using the hwmon dev
 git clone https://github.com/vitallized/nct6687-vrm.git
 cd nct6687-vrm
 
-# 1) Optional — only if CoolerControl (or similar) is running
-sudo systemctl stop coolercontrold
-
-# 2) Compile-check (does not change the live module)
+# 1) Compile-check (does not change the live module)
 sudo python3 ./nct6687_vrm_dkms_inject.py --verify-compile
 
-# 3) Patch DKMS sources, rebuild, reload with vrm=0
+# 2) Patch DKMS sources, rebuild, reload with vrm=0
 sudo python3 ./nct6687_vrm_dkms_inject.py --install
 
-# 4) Confirm fans / board temps still look normal (sensors, CoolerControl, …)
+# 3) Confirm fans / board temps still look normal (`sensors`, etc.)
 
-# 5) Enable VRM
+# 4) Enable VRM
 sudo modprobe -r nct6687
 sudo modprobe nct6687 vrm=1
-
-# 6) Optional — restart CoolerControl if you stopped it
-sudo systemctl start coolercontrold
 ```
-
 Verify:
 
 ```sh
