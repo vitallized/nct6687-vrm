@@ -274,9 +274,16 @@ static void nct6687_update_vrm(struct nct6687_data *data)
 	if (!data->vrm_enabled)
 		return;
 
-	if (data->vrm_valid &&
-	    !time_after(jiffies, data->vrm_last_updated + HZ))
-		return;
+	/*
+	 * Rate-limit even when invalid: a wedged VR/mux must not be hammered at
+	 * hwmon poll rate. Healthy cache: 1 Hz. After failure: retry at ~4 Hz.
+	 */
+	if (data->vrm_last_updated) {
+		unsigned long interval = data->vrm_valid ? HZ : (HZ / 4);
+
+		if (!time_after(jiffies, data->vrm_last_updated + interval))
+			return;
+	}
 
 	addr = (u8)(vrm_addr & 0xff);
 	cfg_save = 0;
@@ -288,6 +295,7 @@ static void nct6687_update_vrm(struct nct6687_data *data)
 	    nct_vrm_esio_read(data, 4, 0x62, &baud_save)) {
 		data->vrm_valid = false;
 		data->vrm_gt_valid = false;
+		data->vrm_last_updated = jiffies;
 		nct_vrm_bus_recover(data);
 		mutex_unlock(&data->EC_io_lock);
 		return;
@@ -300,6 +308,7 @@ static void nct6687_update_vrm(struct nct6687_data *data)
 				&pout_uw, &temp_mc)) {
 		data->vrm_valid = false;
 		data->vrm_gt_valid = false;
+		data->vrm_last_updated = jiffies;
 		nct_vrm_bus_recover(data);
 		nct_vrm_esio_write(data, 0x61, cfg_save);
 		nct_vrm_esio_write(data, 0x62, baud_save);
