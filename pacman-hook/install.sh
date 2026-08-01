@@ -29,5 +29,5 @@ echo "  /usr/local/sbin/nct6687-vrm-reinject"
 echo "  /etc/pacman.d/hooks/nct6687-vrm-reinject.hook"
 echo "  /etc/modprobe.d/nct6687-vrm.conf  (options nct6687 vrm=1)"
 echo
-echo "After editing the inject script in the repo, re-run this install.sh to refresh /usr/local."
-echo "Test dry: sudo /usr/local/sbin/nct6687-vrm-reinject"
+echo "After git pull / inject edits, re-run this script to refresh /usr/local."
+echo "Smoke test (rebuild, no unload): sudo /usr/local/sbin/nct6687-vrm-reinject"
