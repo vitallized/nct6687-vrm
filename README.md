@@ -23,9 +23,9 @@ Other MSI boards with the same EC + VR wiring may work. Confirm `0xC0` with the 
 
 ## Background
 
-This repo reads the Renesas controller through the NCT6687 eSIO SMBus and brings that access to Linux as a small DKMS patch (plus an optional userspace reader).
+These VRM rails are read through the NCT6687 **eSIO SMBus** host — Super-I/O LDN `0x0B` BAR, data window at EC `base+4/+5/+6`, PMBus address `0xC0`, PAGE `0` = CPU Vcore / PAGE `1` = GT/iGPU. The same path works on Linux; MSI’s WMI/BIOS mailbox does not expose this telemetry.
 
-Register-level details: [docs/PROTOCOL.md](docs/PROTOCOL.md).
+This repo turns that into a DKMS patch and an optional userspace reader. More detail (and what not to poke): [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Requirements
 
