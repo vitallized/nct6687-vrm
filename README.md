@@ -77,7 +77,7 @@ sudo modprobe nct6687 vrm=1 vrm_gt=1
 
 → `in22` / `in23` / `curr2` / `power2` / `temp21`
 
-### Persist (Arch / CachyOS)
+### Persist (Arch)
 
 Keeps `vrm=1` across reboot and re-applies the patch when `nct6687d-dkms-git` is upgraded:
 
