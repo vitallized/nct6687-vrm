@@ -1,5 +1,16 @@
 # nct6687-vrm
 
+## Disclaimer
+
+Developed with **AI assistance**. Experimental hardware tooling — **no warranty**.
+
+- Misuse can hang the embedded controller; recovery may need a **full power cycle** (not only a reboot).
+- Review scripts before running as root.
+- Patches **out-of-tree DKMS sources** in place. Upstream `nct6687d` changes can break the inject; re-run after upgrades (or install the pacman hook).
+- Always bring the module up with **`vrm=0` first**, confirm fans/temps, then enable VRM.
+
+## What this is
+
 CPU VRM voltage, current, power, and temperature on Linux — via the NCT6687 **eSIO SMBus**, the same path HWiNFO uses on Windows.
 
 | | |
@@ -15,15 +26,6 @@ Other MSI boards with the same EC + VR wiring may work. Confirm `0xC0` with the 
 On Windows, [HWiNFO](https://www.hwinfo.com/) already exposes these VRM rails on MS-7D89. Matching its NCT **eSIO SMBus** host path (BAR from Super-I/O LDN `0x0B`, window at EC `base+4/+5/+6`, PMBus at `0xC0`, PAGE 0 = CPU / PAGE 1 = GT) to Linux made the same registers readable without the MSI WMI/BIOS mailbox dead ends.
 
 This repo is that path turned into a DKMS patch and a small userspace checker — not an HWiNFO port. Decode details and what *not* to poke: [docs/PROTOCOL.md](docs/PROTOCOL.md).
-
-## Disclaimer
-
-Developed with **AI assistance**. Experimental hardware tooling — **no warranty**.
-
-- Misuse can hang the embedded controller; recovery may need a **full power cycle** (not only a reboot).
-- Review scripts before running as root.
-- Patches **out-of-tree DKMS sources** in place. Upstream `nct6687d` changes can break the inject; re-run after upgrades (or install the pacman hook).
-- Always bring the module up with **`vrm=0` first**, confirm fans/temps, then enable VRM.
 
 ## Requirements
 
