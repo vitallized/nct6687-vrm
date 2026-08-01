@@ -27,14 +27,24 @@ START: write `EN|START` (`0xC0`) to ctrl `0x60`, wait until START clears. Status
 
 Save/restore cfg `0x61` and baud `0x62`; force port bits to `0` for the transfer.
 
-## Decode (this VR)
+## Decode (this VR) — and uncertainty
 
-| Reg | Format |
-|-----|--------|
-| VOUT `0x8B` | `VOUT_MODE` Direct (`0x40`) → mV = raw; else LINEAR16 |
-| VIN `0x88` | Direct → `raw * 10` mV |
-| POUT `0x96`, TEMP `0x8D` | LINEAR11 |
-| IOUT | Prefer `POUT / VOUT` when VOUT > 0.2 V |
+What we use on MS-7D89:
+
+| Reg | Format used here |
+|-----|------------------|
+| VOUT `0x8B` | If `VOUT_MODE` mode bits = Direct (`0x40` → mode 2): treat raw as **mV** (R=3 style). Else LINEAR16 using mode N or `vrm_vout_exp`. |
+| VIN `0x88` | Treat as Direct with **10 mV/LSB** (`raw * 10` → mV), i.e. m=1, b=0, R=2 style. |
+| POUT `0x96`, TEMP `0x8D` | LINEAR11 (standard PMBus) |
+| IOUT | Prefer `POUT / VOUT` when VOUT > 0.2 V; else a coarse LINEAR11-ish fallback |
+
+**These Direct coefficients were not taken from a Renesas datasheet citation in this repo.** They were chosen because they matched HWiNFO / known-good rail values on this board after the PMBus path worked. LINEAR11 for power/temp is standard; the Direct VOUT/VIN scaling is **board- and part-specific inference**.
+
+Implications if you try this on another MSI board or a different VR part number:
+
+- SMBus may NACK or status-fail — obvious failure.
+- Or it may return raw words that look “fine” but decode to **plausible wrong** volts/amps (especially VIN and VOUT) because Direct `m/R` differ.
+- Cross-check against HWiNFO (or a known load) before trusting numbers. Do not assume `0xC0` + these scalings are universal.
 
 ## Safety
 

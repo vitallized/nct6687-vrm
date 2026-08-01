@@ -13,6 +13,8 @@ Developed with **AI assistance**. Experimental hardware tooling — **no warrant
 
 CPU VRM voltage, current, power, and temperature on Linux — via the NCT6687 **eSIO SMBus**, the same path HWiNFO uses on Windows.
 
+The DKMS patch keeps a **small hook splice** in `nct6687.c` and puts the VRM implementation in [`dkms/nct6687_vrm.inc.c`](dkms/nct6687_vrm.inc.c) (`#include`'d at build time). Upstream driver updates are more likely to break a few anchors than a giant inlined blob.
+
 | | |
 |--|--|
 | **Proven** | MSI MPG Z790 CARBON WIFI (**MS-7D89**), Renesas multiphase @ PMBus `0xC0` |
@@ -87,10 +89,19 @@ Keeps `vrm=1` across reboot and re-applies the patch when `nct6687d-dkms-git` is
 sudo bash ./pacman-hook/install.sh
 ```
 
+Audit before running — that script installs:
+
+| Path | Source in this repo |
+|------|---------------------|
+| `/usr/local/lib/nct6687-vrm/nct6687_vrm_dkms_inject.py` | `nct6687_vrm_dkms_inject.py` |
+| `/usr/local/lib/nct6687-vrm/nct6687_vrm.inc.c` | `dkms/nct6687_vrm.inc.c` (VRM implementation `#include`'d into the driver) |
+| `/usr/local/sbin/nct6687-vrm-reinject` | `pacman-hook/nct6687-vrm-reinject` |
+| `/etc/pacman.d/hooks/nct6687-vrm-reinject.hook` | `pacman-hook/nct6687-vrm-reinject.hook` |
+| `/etc/modprobe.d/nct6687-vrm.conf` | `pacman-hook/nct6687-vrm.conf` (`options nct6687 vrm=1`) |
+
 The hook rebuilds on disk during pacman; it does **not** unload the running module mid-transaction. Reboot or reload later to pick up a post-upgrade build.
 
-After `git pull` changes to the inject script, re-run `pacman-hook/install.sh` so `/usr/local` stays in sync.
-
+After `git pull` changes to the inject/include, re-run `pacman-hook/install.sh` so `/usr/local` stays in sync.
 ## Rollback
 
 ```sh
@@ -98,8 +109,9 @@ After `git pull` changes to the inject script, re-run `pacman-hook/install.sh` s
 sudo modprobe -r nct6687
 sudo modprobe nct6687 vrm=0
 
-# Restore stock DKMS sources and rebuild
+# Restore stock DKMS sources (nct6687.c + Makefile) and rebuild
 sudo python3 ./nct6687_vrm_dkms_inject.py --restore --rebuild
+# also removes nct6687_vrm.inc.c from the DKMS tree
 
 # Remove persist bits (if you installed the hook)
 sudo rm -f /etc/pacman.d/hooks/nct6687-vrm-reinject.hook \
