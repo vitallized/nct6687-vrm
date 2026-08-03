@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Present in the #include splice and inside nct6687_vrm.inc.c
@@ -257,8 +258,13 @@ def verify_compile(src: Path) -> Path:
     kver = os.uname().release
     build_root = REPO_ROOT / ".vrm-verify-build"
     if build_root.exists():
-        shutil.rmtree(build_root)
-    build_root.mkdir(parents=True)
+        try:
+            shutil.rmtree(build_root)
+        except OSError:
+            # Prior sudo verify-compile can leave a root-owned tree
+            build_root = Path(tempfile.mkdtemp(prefix="nct6687-vrm-verify-"))
+            print("WARNING: using", build_root, "(could not clear .vrm-verify-build)")
+    build_root.mkdir(parents=True, exist_ok=True)
     raw = src.read_text()
     # Prefer stock Makefile backup so we don't copy an already-patched live Makefile
     mf_src = Path(str(makefile) + ".pre-vrm")
