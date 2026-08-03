@@ -266,6 +266,32 @@ static int nct_vrm_sample_page(struct nct6687_data *data, u8 addr, u8 page,
 	return 0;
 }
 
+/* Software min/max since module load (same idea as stock nct6687 voltage[1]/[2]). */
+static bool vrm_hist_init;
+static long vrm_vout_min, vrm_vout_max;
+static long vrm_vin_min, vrm_vin_max;
+static long vrm_iout_min, vrm_iout_max;
+static long vrm_pout_min, vrm_pout_max;
+static long vrm_temp_min, vrm_temp_max;
+static bool vrm_gt_hist_init;
+static long vrm_gt_vout_min, vrm_gt_vout_max;
+static long vrm_gt_vin_min, vrm_gt_vin_max;
+static long vrm_gt_iout_min, vrm_gt_iout_max;
+static long vrm_gt_pout_min, vrm_gt_pout_max;
+static long vrm_gt_temp_min, vrm_gt_temp_max;
+
+static void nct_vrm_hist_point(long *min, long *max, long val, bool first)
+{
+	if (first)
+		*min = *max = val;
+	else {
+		if (val < *min)
+			*min = val;
+		if (val > *max)
+			*max = val;
+	}
+}
+
 static void nct6687_update_vrm(struct nct6687_data *data)
 {
 	u8 cfg_save, baud_save;
@@ -339,6 +365,16 @@ static void nct6687_update_vrm(struct nct6687_data *data)
 	data->vrm_temp = temp_mc;
 	data->vrm_valid = true;
 	data->vrm_last_updated = jiffies;
+	{
+		bool first = !vrm_hist_init;
+
+		nct_vrm_hist_point(&vrm_vout_min, &vrm_vout_max, vout_mv, first);
+		nct_vrm_hist_point(&vrm_vin_min, &vrm_vin_max, vin_mv, first);
+		nct_vrm_hist_point(&vrm_iout_min, &vrm_iout_max, iout_ma, first);
+		nct_vrm_hist_point(&vrm_pout_min, &vrm_pout_max, pout_uw, first);
+		nct_vrm_hist_point(&vrm_temp_min, &vrm_temp_max, temp_mc, first);
+		vrm_hist_init = true;
+	}
 
 	if (vrm_gt) {
 		if (nct_vrm_sample_page(data, addr, 1, &vout_mv, &vin_mv, &iout_ma,
@@ -346,12 +382,20 @@ static void nct6687_update_vrm(struct nct6687_data *data)
 			data->vrm_gt_valid = false;
 			nct_vrm_bus_recover(data);
 		} else {
+			bool first = !vrm_gt_hist_init;
+
 			data->vrm_gt_vout = vout_mv;
 			data->vrm_gt_vin = vin_mv;
 			data->vrm_gt_iout = iout_ma;
 			data->vrm_gt_pout = pout_uw;
 			data->vrm_gt_temp = temp_mc;
 			data->vrm_gt_valid = true;
+			nct_vrm_hist_point(&vrm_gt_vout_min, &vrm_gt_vout_max, vout_mv, first);
+			nct_vrm_hist_point(&vrm_gt_vin_min, &vrm_gt_vin_max, vin_mv, first);
+			nct_vrm_hist_point(&vrm_gt_iout_min, &vrm_gt_iout_max, iout_ma, first);
+			nct_vrm_hist_point(&vrm_gt_pout_min, &vrm_gt_pout_max, pout_uw, first);
+			nct_vrm_hist_point(&vrm_gt_temp_min, &vrm_gt_temp_max, temp_mc, first);
+			vrm_gt_hist_init = true;
 			nct_vrm_esio_write(data, 0x60, 0x00);
 		}
 	} else {
@@ -420,6 +464,86 @@ static ssize_t show_vrm_temp(struct device *dev, struct device_attribute *attr, 
 	return sprintf(buf, "%ld\n", data->vrm_temp);
 }
 
+static ssize_t show_vrm_vout_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_vout_min);
+}
+
+static ssize_t show_vrm_vout_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_vout_max);
+}
+
+static ssize_t show_vrm_vin_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_vin_min);
+}
+
+static ssize_t show_vrm_vin_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_vin_max);
+}
+
+static ssize_t show_vrm_iout_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_iout_min);
+}
+
+static ssize_t show_vrm_iout_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_iout_max);
+}
+
+static ssize_t show_vrm_pout_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_pout_min);
+}
+
+static ssize_t show_vrm_pout_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_pout_max);
+}
+
+static ssize_t show_vrm_temp_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_temp_min);
+}
+
+static ssize_t show_vrm_temp_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_temp_max);
+}
+
 static ssize_t show_vrm_gt_vout(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct nct6687_data *data = nct_vrm_touch_and_update(dev);
@@ -463,6 +587,86 @@ static ssize_t show_vrm_gt_temp(struct device *dev, struct device_attribute *att
 	if (!data->vrm_gt_valid)
 		return -ENODATA;
 	return sprintf(buf, "%ld\n", data->vrm_gt_temp);
+}
+
+static ssize_t show_vrm_gt_vout_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_vout_min);
+}
+
+static ssize_t show_vrm_gt_vout_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_vout_max);
+}
+
+static ssize_t show_vrm_gt_vin_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_vin_min);
+}
+
+static ssize_t show_vrm_gt_vin_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_vin_max);
+}
+
+static ssize_t show_vrm_gt_iout_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_iout_min);
+}
+
+static ssize_t show_vrm_gt_iout_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_iout_max);
+}
+
+static ssize_t show_vrm_gt_pout_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_pout_min);
+}
+
+static ssize_t show_vrm_gt_pout_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_pout_max);
+}
+
+static ssize_t show_vrm_gt_temp_min(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_temp_min);
+}
+
+static ssize_t show_vrm_gt_temp_max(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	nct_vrm_touch_and_update(dev);
+	if (!vrm_gt_hist_init)
+		return -ENODATA;
+	return sprintf(buf, "%ld\n", vrm_gt_temp_max);
 }
 
 static ssize_t show_vrm_label_vout(struct device *dev, struct device_attribute *attr, char *buf)
@@ -517,24 +721,44 @@ static ssize_t show_vrm_label_gt_temp(struct device *dev, struct device_attribut
 
 static SENSOR_DEVICE_ATTR(in20_input, 0444, show_vrm_vout, NULL, 0);
 static SENSOR_DEVICE_ATTR(in20_label, 0444, show_vrm_label_vout, NULL, 0);
+static SENSOR_DEVICE_ATTR(in20_min, 0444, show_vrm_vout_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(in20_max, 0444, show_vrm_vout_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(in21_input, 0444, show_vrm_vin, NULL, 0);
 static SENSOR_DEVICE_ATTR(in21_label, 0444, show_vrm_label_vin, NULL, 0);
+static SENSOR_DEVICE_ATTR(in21_min, 0444, show_vrm_vin_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(in21_max, 0444, show_vrm_vin_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(curr1_input, 0444, show_vrm_iout, NULL, 0);
 static SENSOR_DEVICE_ATTR(curr1_label, 0444, show_vrm_label_iout, NULL, 0);
+static SENSOR_DEVICE_ATTR(curr1_min, 0444, show_vrm_iout_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(curr1_max, 0444, show_vrm_iout_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(power1_input, 0444, show_vrm_pout, NULL, 0);
 static SENSOR_DEVICE_ATTR(power1_label, 0444, show_vrm_label_pout, NULL, 0);
+static SENSOR_DEVICE_ATTR(power1_min, 0444, show_vrm_pout_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(power1_max, 0444, show_vrm_pout_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(temp20_input, 0444, show_vrm_temp, NULL, 0);
 static SENSOR_DEVICE_ATTR(temp20_label, 0444, show_vrm_label_temp, NULL, 0);
+static SENSOR_DEVICE_ATTR(temp20_min, 0444, show_vrm_temp_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(temp20_max, 0444, show_vrm_temp_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(in22_input, 0444, show_vrm_gt_vout, NULL, 0);
 static SENSOR_DEVICE_ATTR(in22_label, 0444, show_vrm_label_gt_vout, NULL, 0);
+static SENSOR_DEVICE_ATTR(in22_min, 0444, show_vrm_gt_vout_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(in22_max, 0444, show_vrm_gt_vout_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(in23_input, 0444, show_vrm_gt_vin, NULL, 0);
 static SENSOR_DEVICE_ATTR(in23_label, 0444, show_vrm_label_gt_vin, NULL, 0);
+static SENSOR_DEVICE_ATTR(in23_min, 0444, show_vrm_gt_vin_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(in23_max, 0444, show_vrm_gt_vin_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(curr2_input, 0444, show_vrm_gt_iout, NULL, 0);
 static SENSOR_DEVICE_ATTR(curr2_label, 0444, show_vrm_label_gt_iout, NULL, 0);
+static SENSOR_DEVICE_ATTR(curr2_min, 0444, show_vrm_gt_iout_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(curr2_max, 0444, show_vrm_gt_iout_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(power2_input, 0444, show_vrm_gt_pout, NULL, 0);
 static SENSOR_DEVICE_ATTR(power2_label, 0444, show_vrm_label_gt_pout, NULL, 0);
+static SENSOR_DEVICE_ATTR(power2_min, 0444, show_vrm_gt_pout_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(power2_max, 0444, show_vrm_gt_pout_max, NULL, 0);
 static SENSOR_DEVICE_ATTR(temp21_input, 0444, show_vrm_gt_temp, NULL, 0);
 static SENSOR_DEVICE_ATTR(temp21_label, 0444, show_vrm_label_gt_temp, NULL, 0);
+static SENSOR_DEVICE_ATTR(temp21_min, 0444, show_vrm_gt_temp_min, NULL, 0);
+static SENSOR_DEVICE_ATTR(temp21_max, 0444, show_vrm_gt_temp_max, NULL, 0);
 
 static umode_t nct6687_vrm_attr_is_visible(struct kobject *kobj,
 					   struct attribute *attr, int idx)
@@ -542,14 +766,24 @@ static umode_t nct6687_vrm_attr_is_visible(struct kobject *kobj,
 	if (!vrm_gt &&
 	    (attr == &sensor_dev_attr_in22_input.dev_attr.attr ||
 	     attr == &sensor_dev_attr_in22_label.dev_attr.attr ||
+	     attr == &sensor_dev_attr_in22_min.dev_attr.attr ||
+	     attr == &sensor_dev_attr_in22_max.dev_attr.attr ||
 	     attr == &sensor_dev_attr_in23_input.dev_attr.attr ||
 	     attr == &sensor_dev_attr_in23_label.dev_attr.attr ||
+	     attr == &sensor_dev_attr_in23_min.dev_attr.attr ||
+	     attr == &sensor_dev_attr_in23_max.dev_attr.attr ||
 	     attr == &sensor_dev_attr_curr2_input.dev_attr.attr ||
 	     attr == &sensor_dev_attr_curr2_label.dev_attr.attr ||
+	     attr == &sensor_dev_attr_curr2_min.dev_attr.attr ||
+	     attr == &sensor_dev_attr_curr2_max.dev_attr.attr ||
 	     attr == &sensor_dev_attr_power2_input.dev_attr.attr ||
 	     attr == &sensor_dev_attr_power2_label.dev_attr.attr ||
+	     attr == &sensor_dev_attr_power2_min.dev_attr.attr ||
+	     attr == &sensor_dev_attr_power2_max.dev_attr.attr ||
 	     attr == &sensor_dev_attr_temp21_input.dev_attr.attr ||
-	     attr == &sensor_dev_attr_temp21_label.dev_attr.attr))
+	     attr == &sensor_dev_attr_temp21_label.dev_attr.attr ||
+	     attr == &sensor_dev_attr_temp21_min.dev_attr.attr ||
+	     attr == &sensor_dev_attr_temp21_max.dev_attr.attr))
 		return 0;
 	return 0444;
 }
@@ -557,24 +791,44 @@ static umode_t nct6687_vrm_attr_is_visible(struct kobject *kobj,
 static struct attribute *nct6687_vrm_attrs[] = {
 	&sensor_dev_attr_in20_input.dev_attr.attr,
 	&sensor_dev_attr_in20_label.dev_attr.attr,
+	&sensor_dev_attr_in20_min.dev_attr.attr,
+	&sensor_dev_attr_in20_max.dev_attr.attr,
 	&sensor_dev_attr_in21_input.dev_attr.attr,
 	&sensor_dev_attr_in21_label.dev_attr.attr,
+	&sensor_dev_attr_in21_min.dev_attr.attr,
+	&sensor_dev_attr_in21_max.dev_attr.attr,
 	&sensor_dev_attr_curr1_input.dev_attr.attr,
 	&sensor_dev_attr_curr1_label.dev_attr.attr,
+	&sensor_dev_attr_curr1_min.dev_attr.attr,
+	&sensor_dev_attr_curr1_max.dev_attr.attr,
 	&sensor_dev_attr_power1_input.dev_attr.attr,
 	&sensor_dev_attr_power1_label.dev_attr.attr,
+	&sensor_dev_attr_power1_min.dev_attr.attr,
+	&sensor_dev_attr_power1_max.dev_attr.attr,
 	&sensor_dev_attr_temp20_input.dev_attr.attr,
 	&sensor_dev_attr_temp20_label.dev_attr.attr,
+	&sensor_dev_attr_temp20_min.dev_attr.attr,
+	&sensor_dev_attr_temp20_max.dev_attr.attr,
 	&sensor_dev_attr_in22_input.dev_attr.attr,
 	&sensor_dev_attr_in22_label.dev_attr.attr,
+	&sensor_dev_attr_in22_min.dev_attr.attr,
+	&sensor_dev_attr_in22_max.dev_attr.attr,
 	&sensor_dev_attr_in23_input.dev_attr.attr,
 	&sensor_dev_attr_in23_label.dev_attr.attr,
+	&sensor_dev_attr_in23_min.dev_attr.attr,
+	&sensor_dev_attr_in23_max.dev_attr.attr,
 	&sensor_dev_attr_curr2_input.dev_attr.attr,
 	&sensor_dev_attr_curr2_label.dev_attr.attr,
+	&sensor_dev_attr_curr2_min.dev_attr.attr,
+	&sensor_dev_attr_curr2_max.dev_attr.attr,
 	&sensor_dev_attr_power2_input.dev_attr.attr,
 	&sensor_dev_attr_power2_label.dev_attr.attr,
+	&sensor_dev_attr_power2_min.dev_attr.attr,
+	&sensor_dev_attr_power2_max.dev_attr.attr,
 	&sensor_dev_attr_temp21_input.dev_attr.attr,
 	&sensor_dev_attr_temp21_label.dev_attr.attr,
+	&sensor_dev_attr_temp21_min.dev_attr.attr,
+	&sensor_dev_attr_temp21_max.dev_attr.attr,
 	NULL,
 };
 
