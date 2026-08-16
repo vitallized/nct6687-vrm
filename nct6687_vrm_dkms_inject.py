@@ -47,7 +47,10 @@ STRUCT_FIELDS = """
 	long vrm_gt_temp;
 """
 
-FORWARD_DECL = "\nstatic void nct6687_update_vrm(struct nct6687_data *data);\n"
+FORWARD_DECL = (
+    "\nstatic struct nct6687_data *nct6687_update_device(struct device *dev);\n"
+    "static void nct6687_update_vrm(struct nct6687_data *data);\n"
+)
 
 # Thin splice — bulk implementation is in INC_NAME
 VRM_INCLUDE = f"""
@@ -70,16 +73,12 @@ PROBE_ENABLE = """
 
 """
 
-GROUP_INSERT = """\
-	if (data->vrm_enabled)
-		data->groups[groups++] = &nct6687_vrm_group;
-
-"""
-
 # Stock Makefile `build:` only copies nct6687.c into ${kver}/ — include must go too.
-MAKEFILE_CP_OLD = "cp ${curpwd}/Makefile ${curpwd}/nct6687.c ${curpwd}/${kver}"
+MAKEFILE_CP_OLD = (
+    "cp ${curpwd}/Kbuild ${curpwd}/Makefile ${curpwd}/nct6687.c ${curpwd}/${kver}"
+)
 MAKEFILE_CP_NEW = (
-    f"cp ${{curpwd}}/Makefile ${{curpwd}}/nct6687.c "
+    f"cp ${{curpwd}}/Kbuild ${{curpwd}}/Makefile ${{curpwd}}/nct6687.c "
     f"${{curpwd}}/{INC_NAME} ${{curpwd}}/${{kver}}"
 )
 
@@ -119,7 +118,9 @@ def parse_dkms(pkg_dir: Path) -> tuple[str, str]:
 
 def installed_kernels(pname: str, pver: str) -> list[str]:
     try:
-        out = subprocess.check_output(["dkms", "status", "-m", pname, "-v", pver], text=True)
+        out = subprocess.check_output(
+            ["dkms", "status", "-m", pname, "-v", pver], text=True
+        )
     except subprocess.CalledProcessError:
         return [os.uname().release]
     kvers = []
@@ -170,19 +171,24 @@ def inject_text(text: str) -> str:
     needle = "\tstruct mutex update_lock;"
     if needle not in text:
         raise SystemExit("struct field anchor not found")
-    if "const struct attribute_group *groups[6]" not in text:
-        raise SystemExit("groups[6] not found — cannot safely add VRM group")
+    EXTRA_GROUPS_OLD = "const struct attribute_group *extra_groups[2];"
+    EXTRA_GROUPS_NEW = "const struct attribute_group *extra_groups[3];"
+    if EXTRA_GROUPS_OLD not in text:
+        raise SystemExit(
+            "extra_groups[2] not found — driver group registration changed again"
+        )
+    text = text.replace(EXTRA_GROUPS_OLD, EXTRA_GROUPS_NEW, 1)
     text = text.replace(needle, STRUCT_FIELDS + "\n" + needle, 1)
 
     upd_sig = "static struct nct6687_data *nct6687_update_device(struct device *dev)"
     if upd_sig not in text:
         raise SystemExit("nct6687_update_device signature not found")
-    text = text.replace(upd_sig, FORWARD_DECL + "\n" + upd_sig, 1)
+    text = text.replace(upd_sig, FORWARD_DECL + VRM_INCLUDE + upd_sig, 1)
 
-    anchor = "/*\n * Sysfs callback functions\n */"
-    if anchor not in text:
-        raise SystemExit("sysfs anchor not found")
-    text = text.replace(anchor, VRM_INCLUDE + anchor, 1)
+    # anchor = "/*\n * Sysfs callback functions\n */"
+    # if anchor not in text:
+    # raise SystemExit("sysfs anchor not found")
+    # text = text.replace(anchor, VRM_INCLUDE + anchor, 1)
 
     upd_end = (
         "\t\tdata->last_updated = jiffies;\n"
@@ -211,11 +217,24 @@ def inject_text(text: str) -> str:
         raise SystemExit("probe setup anchor not found")
     text = text.replace(probe_anchor, probe_anchor + PROBE_ENABLE, 1)
 
-    idx = text.find("scnprintf(build, sizeof(build)")
-    if idx < 0:
-        raise SystemExit("probe group anchor (scnprintf build) not found")
-    line_start = text.rfind("\n", 0, idx) + 1
-    text = text[:line_start] + GROUP_INSERT + text[line_start:]
+    EXTRA_GROUPS_ASSIGN_OLD = (
+        "\tif (nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)\n"
+        "\t\tdata->extra_groups[0] = &nct6687_fan_watchdog_group;\n"
+    )
+    EXTRA_GROUPS_ASSIGN_NEW = (
+        "\t{\n"
+        "\t\tint eg = 0;\n\n"
+        "\t\tif (nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)\n"
+        "\t\t\tdata->extra_groups[eg++] = &nct6687_fan_watchdog_group;\n"
+        "\t\tif (data->vrm_enabled)\n"
+        "\t\t\tdata->extra_groups[eg++] = &nct6687_vrm_group;\n"
+        "\t}\n"
+    )
+    if EXTRA_GROUPS_ASSIGN_OLD not in text:
+        raise SystemExit(
+            "fan_watchdog extra_groups assignment not found — anchor changed"
+        )
+    text = text.replace(EXTRA_GROUPS_ASSIGN_OLD, EXTRA_GROUPS_ASSIGN_NEW, 1)
     return text
 
 
@@ -270,10 +289,17 @@ def verify_compile(src: Path) -> Path:
     mf_src = Path(str(makefile) + ".pre-vrm")
     shutil.copy2(mf_src if mf_src.is_file() else makefile, build_root / "Makefile")
     patch_makefile(build_root)
+    kbuild_src = pkg_dir / "Kbuild"
+    if kbuild_src.is_file():
+        shutil.copy2(kbuild_src, build_root / "Kbuild")
+    else:
+        raise SystemExit(f"No Kbuild in {pkg_dir} — cannot verify-compile")
     if MARKER in raw and f'#include "{INC_NAME}"' in raw:
         (build_root / "nct6687.c").write_text(raw)
         live_inc = pkg_dir / INC_NAME
-        shutil.copy2(live_inc if live_inc.is_file() else find_inc(), build_root / INC_NAME)
+        shutil.copy2(
+            live_inc if live_inc.is_file() else find_inc(), build_root / INC_NAME
+        )
     elif MARKER in raw:
         # Legacy single-file inject — rebuild from stock backup if present
         bak = Path(str(src) + ".pre-vrm")
@@ -307,9 +333,13 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
     for kver in kvers:
         # install --force alone reuses stale builds; source was patched in-place
         print(f"--- dkms build -k {kver} --force ---")
-        subprocess.check_call(["dkms", "build", "-m", pname, "-v", pver, "-k", kver, "--force"])
+        subprocess.check_call(
+            ["dkms", "build", "-m", pname, "-v", pver, "-k", kver, "--force"]
+        )
         print(f"--- dkms install -k {kver} --force ---")
-        subprocess.check_call(["dkms", "install", "-m", pname, "-v", pver, "-k", kver, "--force"])
+        subprocess.check_call(
+            ["dkms", "install", "-m", pname, "-v", pver, "-k", kver, "--force"]
+        )
     if not reload:
         print("Skipped modprobe reload (--no-reload).")
         return
@@ -341,9 +371,12 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
         if load_vrm:
             print("Loaded WITH VRM. Rollback: modprobe nct6687 vrm=0")
         else:
-            print("Loaded with vrm=0. Enable later: modprobe -r nct6687 && modprobe nct6687 vrm=1")
+            print(
+                "Loaded with vrm=0. Enable later: modprobe -r nct6687 && modprobe nct6687 vrm=1"
+            )
     else:
         print("Loaded stock nct6687 (no VRM patch in sources).")
+
 
 def want_vrm_enabled(cli_enable: bool) -> bool:
     """CLI --enable-vrm wins; else honor /etc/modprobe.d/*nct6687* options."""
@@ -381,7 +414,9 @@ def reinject(src: Path, reload: bool, load_vrm: bool) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--verify-compile", action="store_true")
     ap.add_argument("--install", action="store_true")
     ap.add_argument("--restore", action="store_true")
@@ -395,15 +430,24 @@ def main() -> int:
     ap.add_argument("--enable-vrm", action="store_true")
     ap.add_argument("--src", type=Path, default=None)
     args = ap.parse_args()
-    if not any([args.verify_compile, args.install, args.restore, args.rebuild, args.reinject]):
+    if not any(
+        [args.verify_compile, args.install, args.restore, args.rebuild, args.reinject]
+    ):
         ap.print_help()
-        print("\nRefusing bare run. Use --verify-compile first, then --install.", file=sys.stderr)
+        print(
+            "\nRefusing bare run. Use --verify-compile first, then --install.",
+            file=sys.stderr,
+        )
         return 2
     if args.verify_compile:
         verify_compile(args.src or find_src())
-        print("\nCompile OK. Install with: sudo python3", Path(__file__).name, "--install")
+        print(
+            "\nCompile OK. Install with: sudo python3", Path(__file__).name, "--install"
+        )
         return 0
-    if os.geteuid() != 0 and (args.install or args.restore or args.rebuild or args.reinject):
+    if os.geteuid() != 0 and (
+        args.install or args.restore or args.rebuild or args.reinject
+    ):
         print("Need root", file=sys.stderr)
         return 1
     src = args.src or find_src()
