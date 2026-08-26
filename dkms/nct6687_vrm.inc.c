@@ -107,8 +107,11 @@ static int nct_vrm_wait_start_clear(struct nct6687_data* data)
     return -ETIMEDOUT;
 }
 
+static void nct_vrm_invalidate_smbus(void);
+
 static void nct_vrm_bus_recover(struct nct6687_data* data)
 {
+    nct_vrm_invalidate_smbus();
     nct_vrm_prep_clear(data);
     nct_vrm_esio_write(data, 0x60, 0x00);
 }
@@ -212,28 +215,70 @@ static long nct_vrm_decode_vout_mv(u16 vout, u8 vout_mode)
     return ((long)vout * 1000L) >> (-exp);
 }
 
+/* Single-device caches (same assumption as the min/max hist below). */
+static int vrm_smbus_page = -1;
+static u8 vrm_vout_mode_cache[2];
+static bool vrm_vout_mode_valid[2];
+
+static void nct_vrm_invalidate_smbus(void)
+{
+    vrm_smbus_page = -1;
+    vrm_vout_mode_valid[0] = false;
+    vrm_vout_mode_valid[1] = false;
+}
+
 static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
     long* vout_mv, long* vin_mv, long* iout_ma,
     long* pout_uw, long* temp_mc)
 {
-    u16 vout, iout, pout, vin, temp;
+    u16 vout, iout = 0, pout, vin, temp;
     u8 vout_mode, page_r;
     long v_mv, p_mw, t_mc, i_ma;
 
-    if (nct_vrm_write_byte(data, addr, 0x00, page) || nct_vrm_read_byte(data, addr, 0x00, &page_r))
+    if (page > 1)
+        return -EINVAL;
+
+    if (vrm_smbus_page != page) {
+        if (nct_vrm_write_byte(data, addr, 0x00, page) || nct_vrm_read_byte(data, addr, 0x00, &page_r)) {
+            nct_vrm_invalidate_smbus();
+            return -EIO;
+        }
+        if (page_r != page) {
+            nct_vrm_invalidate_smbus();
+            return -EIO;
+        }
+        vrm_smbus_page = page;
+    }
+
+    if (!vrm_vout_mode_valid[page]) {
+        if (nct_vrm_read_byte(data, addr, 0x20, &vout_mode)) {
+            nct_vrm_invalidate_smbus();
+            return -EIO;
+        }
+        vrm_vout_mode_cache[page] = vout_mode;
+        vrm_vout_mode_valid[page] = true;
+    } else {
+        vout_mode = vrm_vout_mode_cache[page];
+    }
+
+    /* VOUT, POUT, VIN, TEMP — skip IOUT unless P/V is unusable. */
+    if (nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8d, &temp)) {
+        nct_vrm_invalidate_smbus();
         return -EIO;
-    if (page_r != page)
-        return -EIO;
-    if (nct_vrm_read_byte(data, addr, 0x20, &vout_mode) || nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x8c, &iout) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8d, &temp))
-        return -EIO;
+    }
 
     v_mv = nct_vrm_decode_vout_mv(vout, vout_mode);
     p_mw = nct_vrm_linear11_milli(pout);
     t_mc = nct_vrm_linear11_milli(temp);
-    if (v_mv > 200)
+    if (v_mv > 200) {
         i_ma = (p_mw * 1000L) / v_mv;
-    else
+    } else {
+        if (nct_vrm_read_word(data, addr, 0x8c, &iout)) {
+            nct_vrm_invalidate_smbus();
+            return -EIO;
+        }
         i_ma = ((long)iout * 1000L) >> 3;
+    }
 
     *vout_mv = v_mv;
     *vin_mv = (long)vin * 10L;
@@ -387,7 +432,23 @@ static struct nct6687_data* nct_vrm_touch_and_update(struct device* dev)
     data->vrm_read_gap = data->vrm_last_read ? now - data->vrm_last_read : HZ;
     data->vrm_last_read = now;
     data->vrm_demand = true;
-    return nct6687_update_device(dev);
+    /* VRM sysfs must not go through nct6687_update_device: that refreshes
+     * every fan/temp/volt channel under update_lock. HUD polling would
+     * otherwise force a full EC scan ~1 Hz on top of the SMBus sample.
+     * Background 1 Hz VRM still runs from the update_device hook when
+     * other nct6687 attrs are read.
+     */
+    nct6687_update_vrm(data);
+    return data;
+}
+
+static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, char* buf)
+{
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_valid)
+        return -ENODATA;
+    return sprintf(buf, "%ld %ld %ld\n", data->vrm_vout, data->vrm_iout, data->vrm_pout);
 }
 
 static ssize_t show_vrm_vout(struct device* dev, struct device_attribute* attr, char* buf)
@@ -690,6 +751,7 @@ static ssize_t show_vrm_label_gt_temp(struct device* dev, struct device_attribut
     return sprintf(buf, "VRM GT TEMP\n");
 }
 
+static DEVICE_ATTR_RO(vrm_cpu);
 static SENSOR_DEVICE_ATTR(in20_input, 0444, show_vrm_vout, NULL, 0);
 static SENSOR_DEVICE_ATTR(in20_label, 0444, show_vrm_label_vout, NULL, 0);
 static SENSOR_DEVICE_ATTR(in20_min, 0444, show_vrm_vout_min, NULL, 0);
@@ -740,6 +802,7 @@ static umode_t nct6687_vrm_attr_is_visible(struct kobject* kobj,
 }
 
 static struct attribute* nct6687_vrm_attrs[] = {
+    &dev_attr_vrm_cpu.attr,
     &sensor_dev_attr_in20_input.dev_attr.attr,
     &sensor_dev_attr_in20_label.dev_attr.attr,
     &sensor_dev_attr_in20_min.dev_attr.attr,

@@ -1,0 +1,13 @@
+# Drop unowned extras in /usr/src/nct6687d* before the package extracts.
+# Avoids "exists in filesystem" when a leftover file later becomes packaged.
+[Trigger]
+Operation = Upgrade
+Operation = Install
+Type = Package
+Target = nct6687d-dkms-git
+
+[Action]
+Description = Clear unowned NCT6687 DKMS extras before upgrade
+When = PreTransaction
+Exec = /usr/local/sbin/nct6687-vrm-preupgrade
+Depends = python

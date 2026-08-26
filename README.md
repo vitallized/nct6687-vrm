@@ -71,8 +71,9 @@ sensors
 | `curr1_input` | CPU IOUT | mA |
 | `power1_input` | CPU POUT | µW |
 | `temp20_input` | VR temperature | m°C |
+| `vrm_cpu` | CPU VOUT + IOUT + POUT (one read) | mV mA µW |
 
-Cache defaults to **1 Hz**; polling VRM hwmon faster raises the sample rate down to ~**20 ms**. Fast polling shares `EC_io_lock` with fans/temps (can delay those reads).
+Cache defaults to **1 Hz**; polling VRM hwmon faster raises the sample rate down to ~**20 ms**. Fast polling shares `EC_io_lock` with fans/temps (can delay those reads). VRM sysfs reads sample only the VR (not the full fan/temp scan); `vrm_cpu` is the cheap HUD path (one demand-touch, coherent snapshot).
 
 GT / iGPU (PMBus PAGE 1), usually idle with a discrete GPU:
 
@@ -97,13 +98,22 @@ Audit before running — that script installs:
 |------|---------------------|
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm_dkms_inject.py` | `nct6687_vrm_dkms_inject.py` |
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm.inc.c` | `dkms/nct6687_vrm.inc.c` (VRM implementation `#include`'d into the driver) |
+| `/usr/local/lib/nct6687-vrm/refresh-from-source.sh` | `pacman-hook/refresh-from-source.sh` |
+| `/usr/local/lib/nct6687-vrm/source.env` | written at install (`SOURCE_REPO=` this checkout) |
+| `/usr/local/sbin/nct6687-vrm-preupgrade` | `pacman-hook/nct6687-vrm-preupgrade` |
 | `/usr/local/sbin/nct6687-vrm-reinject` | `pacman-hook/nct6687-vrm-reinject` |
+| `/etc/pacman.d/hooks/nct6687-vrm-preupgrade.hook` | `pacman-hook/nct6687-vrm-preupgrade.hook` |
 | `/etc/pacman.d/hooks/nct6687-vrm-reinject.hook` | `pacman-hook/nct6687-vrm-reinject.hook` |
 | `/etc/modprobe.d/nct6687-vrm.conf` | `pacman-hook/nct6687-vrm.conf` (`options nct6687 vrm=1`) |
 
-The hook rebuilds on disk during pacman; it does **not** unload the running module mid-transaction. Reboot or reload later to pick up a post-upgrade build.
+The **pre-upgrade** hook deletes unowned files in `/usr/src/nct6687d*` (VRM include, `*.pre-vrm` backups, a leftover `Kbuild`, …) so pacman can extract newly packaged files. That is what blocked `nct6687d-dkms-git` when upstream started shipping `Kbuild`.
 
-After `git pull` changes to the inject/include, re-run `pacman-hook/install.sh` so `/usr/local` stays in sync.
+The **post-upgrade** hook rebuilds on disk; it does **not** unload the running module mid-transaction. Reboot or reload later to pick up a post-upgrade build.
+
+If this checkout still exists at `SOURCE_REPO`, both helpers copy a newer inject/include into `/usr/local` before running — so a `git pull` is enough for the next upgrade. Re-run `install.sh` after moving the repo, or to refresh immediately.
+
+Status: `python3 ./nct6687_vrm_dkms_inject.py --check`
+
 ## Rollback
 
 ```sh
@@ -117,8 +127,10 @@ sudo python3 ./nct6687_vrm_dkms_inject.py --restore --rebuild
 
 # Remove persist bits (if you installed the hook)
 sudo rm -f /etc/pacman.d/hooks/nct6687-vrm-reinject.hook \
+           /etc/pacman.d/hooks/nct6687-vrm-preupgrade.hook \
            /etc/modprobe.d/nct6687-vrm.conf \
-           /usr/local/sbin/nct6687-vrm-reinject
+           /usr/local/sbin/nct6687-vrm-reinject \
+           /usr/local/sbin/nct6687-vrm-preupgrade
 sudo rm -rf /usr/local/lib/nct6687-vrm
 ```
 

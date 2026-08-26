@@ -73,20 +73,23 @@ PROBE_ENABLE = """
 
 """
 
-# Stock Makefile `build:` only copies nct6687.c into ${kver}/ — include must go too.
-MAKEFILE_CP_OLD = (
-    "cp ${curpwd}/Kbuild ${curpwd}/Makefile ${curpwd}/nct6687.c ${curpwd}/${kver}"
+# `build:` copies sources into ${kver}/. Upstream has shipped this with and
+# without Kbuild; we only require the VRM include to be on that cp line.
+_CP_TO_KVER = re.compile(
+    r"^(\t*cp(?: \$\{curpwd\}/[^\s]+)+) \$\{curpwd\}/\$\{kver\}\s*$",
+    re.M,
 )
-MAKEFILE_CP_NEW = (
-    f"cp ${{curpwd}}/Kbuild ${{curpwd}}/Makefile ${{curpwd}}/nct6687.c "
-    f"${{curpwd}}/{INC_NAME} ${{curpwd}}/${{kver}}"
-)
+
+PACMAN_LOCAL = Path("/var/lib/pacman/local")
+INSTALLED_LIB = Path("/usr/local/lib/nct6687-vrm")
+MINIMAL_KBUILD = "obj-m += nct6687.o\n"
 
 
 def find_inc() -> Path:
     candidates = [
         REPO_ROOT / "dkms" / INC_NAME,
         REPO_ROOT / INC_NAME,
+        INSTALLED_LIB / INC_NAME,
     ]
     for p in candidates:
         if p.is_file():
@@ -96,11 +99,99 @@ def find_inc() -> Path:
     )
 
 
+def _pacman_owned_files(pkg_prefix: str = "nct6687d-dkms-git-") -> set[str]:
+    """Paths from the local alpm files db (no `pacman` CLI — safe in hooks)."""
+    owned: set[str] = set()
+    if not PACMAN_LOCAL.is_dir():
+        return owned
+    for files_db in PACMAN_LOCAL.glob(f"{pkg_prefix}*/files"):
+        in_files = False
+        try:
+            text = files_db.read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line == "%FILES%":
+                in_files = True
+                continue
+            if line.startswith("%"):
+                in_files = False
+                continue
+            if in_files and line:
+                owned.add(line.rstrip("/"))
+    return owned
+
+
+def src_dirs() -> list[Path]:
+    found = {Path(p).parent for p in glob.glob("/usr/src/nct6687d*/nct6687.c")}
+    return sorted(found)
+
+
 def find_src() -> Path:
-    matches = sorted(glob.glob("/usr/src/nct6687d*/nct6687.c"))
+    owned = _pacman_owned_files()
+    for rel in sorted(owned):
+        if rel.endswith("/nct6687.c"):
+            p = Path("/") / rel
+            if p.is_file():
+                return p
+    matches = glob.glob("/usr/src/nct6687d*/nct6687.c")
     if not matches:
         raise SystemExit("No /usr/src/nct6687d*/nct6687.c found")
+    matches.sort(key=lambda p: Path(p).stat().st_mtime)
     return Path(matches[-1])
+
+
+def patched_makefile_text(text: str, extra_names: list[str]) -> tuple[str | None, bool]:
+    """Insert extra filenames into the stock `cp … ${kver}` line.
+
+    Returns (None, False) if that line is missing.
+    """
+    m = _CP_TO_KVER.search(text)
+    if not m:
+        return None, False
+    prefix = m.group(1)
+    new_prefix = prefix
+    for name in extra_names:
+        token = f"${{curpwd}}/{name}"
+        if token not in new_prefix:
+            new_prefix = f"{new_prefix} {token}"
+    if new_prefix == prefix:
+        return text, False
+    return text[: m.start(1)] + new_prefix + text[m.end(1) :], True
+
+
+def unowned_toplevel(pkg_dir: Path) -> list[Path]:
+    """Top-level files in the DKMS tree that the installed package does not own."""
+    owned = _pacman_owned_files()
+    extras: list[Path] = []
+    if not pkg_dir.is_dir():
+        return extras
+    for child in sorted(pkg_dir.iterdir()):
+        if not child.is_file():
+            continue
+        rel = child.as_posix().lstrip("/")
+        if owned and rel in owned:
+            continue
+        if not owned and child.name != INC_NAME and not child.name.endswith(".pre-vrm"):
+            # No files db — only drop extras we created, never Kbuild/etc.
+            continue
+        extras.append(child)
+    return extras
+
+
+def clear_unowned(pkg_dirs: list[Path] | None = None) -> list[Path]:
+    """Remove unowned top-level files so pacman can extract newly packaged ones.
+
+    This is the Kbuild trap: an extra file we (or a manual copy) dropped into
+    /usr/src/… later became a package file, and the upgrade aborted.
+    """
+    removed: list[Path] = []
+    for pkg_dir in pkg_dirs or src_dirs():
+        for path in unowned_toplevel(pkg_dir):
+            path.unlink()
+            print("Removed unowned", path)
+            removed.append(path)
+    return removed
 
 
 def parse_dkms(pkg_dir: Path) -> tuple[str, str]:
@@ -144,19 +235,22 @@ def patch_makefile(pkg_dir: Path) -> None:
     mf = pkg_dir / "Makefile"
     if not mf.is_file():
         return
-    text = mf.read_text()
-    if MAKEFILE_CP_NEW in text:
-        return
-    if MAKEFILE_CP_OLD not in text:
+    extra = [INC_NAME]
+    if (pkg_dir / "Kbuild").is_file():
+        extra.insert(0, "Kbuild")
+    new_text, changed = patched_makefile_text(mf.read_text(), extra)
+    if new_text is None:
         print(
             "WARNING: Makefile cp line not found — verify-compile may fail; "
             "DKMS in-tree build may still work if the include sits beside nct6687.c"
         )
         return
+    if not changed:
+        return
     bak = Path(str(mf) + ".pre-vrm")
     if not bak.exists():
         shutil.copy2(mf, bak)
-    mf.write_text(text.replace(MAKEFILE_CP_OLD, MAKEFILE_CP_NEW, 1))
+    mf.write_text(new_text)
     print("Patched", mf)
 
 
@@ -184,11 +278,6 @@ def inject_text(text: str) -> str:
     if upd_sig not in text:
         raise SystemExit("nct6687_update_device signature not found")
     text = text.replace(upd_sig, FORWARD_DECL + VRM_INCLUDE + upd_sig, 1)
-
-    # anchor = "/*\n * Sysfs callback functions\n */"
-    # if anchor not in text:
-    # raise SystemExit("sysfs anchor not found")
-    # text = text.replace(anchor, VRM_INCLUDE + anchor, 1)
 
     upd_end = (
         "\t\tdata->last_updated = jiffies;\n"
@@ -288,18 +377,18 @@ def verify_compile(src: Path) -> Path:
     # Prefer stock Makefile backup so we don't copy an already-patched live Makefile
     mf_src = Path(str(makefile) + ".pre-vrm")
     shutil.copy2(mf_src if mf_src.is_file() else makefile, build_root / "Makefile")
-    patch_makefile(build_root)
     kbuild_src = pkg_dir / "Kbuild"
     if kbuild_src.is_file():
         shutil.copy2(kbuild_src, build_root / "Kbuild")
     else:
-        raise SystemExit(f"No Kbuild in {pkg_dir} — cannot verify-compile")
+        (build_root / "Kbuild").write_text(MINIMAL_KBUILD)
+        print("WARNING: no Kbuild in", pkg_dir, "— synthesized a minimal one for verify-compile")
+    patch_makefile(build_root)
     if MARKER in raw and f'#include "{INC_NAME}"' in raw:
         (build_root / "nct6687.c").write_text(raw)
-        live_inc = pkg_dir / INC_NAME
-        shutil.copy2(
-            live_inc if live_inc.is_file() else find_inc(), build_root / INC_NAME
-        )
+        # Prefer the checkout include so --verify-compile tests local edits,
+        # not a stale copy sitting in /usr/src.
+        shutil.copy2(find_inc(), build_root / INC_NAME)
     elif MARKER in raw:
         # Legacy single-file inject — rebuild from stock backup if present
         bak = Path(str(src) + ".pre-vrm")
@@ -330,7 +419,17 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
     if current not in kvers:
         kvers.append(current)
     print(f"Rebuilding {pname}/{pver} for kernels: {', '.join(kvers)}")
+    built = 0
     for kver in kvers:
+        headers = Path(f"/lib/modules/{kver}/build")
+        if not headers.is_dir():
+            msg = f"Skipping {kver}: no kernel headers at {headers}"
+            if kver == current:
+                raise SystemExit(
+                    f"No kernel headers for running kernel {kver} ({headers})"
+                )
+            print(msg)
+            continue
         # install --force alone reuses stale builds; source was patched in-place
         print(f"--- dkms build -k {kver} --force ---")
         subprocess.check_call(
@@ -340,6 +439,9 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
         subprocess.check_call(
             ["dkms", "install", "-m", pname, "-v", pver, "-k", kver, "--force"]
         )
+        built += 1
+    if built == 0:
+        raise SystemExit("DKMS rebuild skipped every kernel (no headers?)")
     if not reload:
         print("Skipped modprobe reload (--no-reload).")
         return
@@ -402,6 +504,73 @@ def want_vrm_enabled(cli_enable: bool) -> bool:
     return False
 
 
+def warn_if_hook_stale() -> None:
+    installed = INSTALLED_LIB / Path(__file__).name
+    here = Path(__file__).resolve()
+    if not installed.is_file() or here == installed:
+        return
+    try:
+        if installed.read_bytes() == here.read_bytes():
+            return
+    except OSError:
+        return
+    print(
+        "WARNING: /usr/local inject script differs from this checkout.\n"
+        "  sudo bash pacman-hook/install.sh\n"
+        "  (the pacman hook auto-refreshes if source.env still points here)",
+        file=sys.stderr,
+    )
+
+
+def check() -> int:
+    """Print hook/src status. Exit 1 if stale copy or unexpected unowned files."""
+    src = find_src()
+    injected = MARKER in src.read_text()
+    extras = unowned_toplevel(src.parent)
+    expected, unexpected = [], []
+    for p in extras:
+        if p.name == INC_NAME or p.name.endswith(".pre-vrm"):
+            expected.append(p)
+        else:
+            unexpected.append(p)
+    print("DKMS source:", src)
+    print("Injected:", injected)
+    if expected:
+        print("Expected extras (cleared automatically on the next package upgrade):")
+        for p in expected:
+            print(" ", p)
+    if unexpected:
+        print("Unexpected unowned files (pacman will refuse the next upgrade):")
+        for p in unexpected:
+            print(" ", p)
+    elif not expected:
+        print("Unowned files: none")
+    here = Path(__file__).resolve()
+    print("This script:", here)
+    installed_py = INSTALLED_LIB / here.name
+    stale = False
+    if installed_py.is_file():
+        py_stale = installed_py.read_bytes() != here.read_bytes()
+        stale = stale or py_stale
+        print("Installed hook copy:", "STALE" if py_stale else "ok")
+        inc_i = INSTALLED_LIB / INC_NAME
+        if inc_i.is_file():
+            inc_stale = inc_i.read_bytes() != find_inc().read_bytes()
+            stale = stale or inc_stale
+            print("Installed include:", "STALE" if inc_stale else "ok")
+    else:
+        print("Installed hook copy: missing (run pacman-hook/install.sh)")
+        stale = True
+    env = INSTALLED_LIB / "source.env"
+    if env.is_file():
+        print(env.read_text().rstrip())
+    else:
+        print("source.env: missing")
+    if unexpected or stale:
+        return 1
+    return 0
+
+
 def reinject(src: Path, reload: bool, load_vrm: bool) -> None:
     """Pacman-hook path: patch wiped stock sources, force-rebuild DKMS."""
     if MARKER not in src.read_text():
@@ -410,6 +579,7 @@ def reinject(src: Path, reload: bool, load_vrm: bool) -> None:
     else:
         print("VRM patch already present in", src)
         install_inc(src.parent)
+        patch_makefile(src.parent)
     rebuild(src, reload=reload, load_vrm=load_vrm)
 
 
@@ -426,12 +596,31 @@ def main() -> int:
         action="store_true",
         help="Re-apply patch after package upgrade (pacman hook); skips verify-compile",
     )
+    ap.add_argument(
+        "--pre-upgrade",
+        action="store_true",
+        help="Remove unowned files in the DKMS src dir (pacman PreTransaction)",
+    )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="Print inject/hook status; exit 1 if stale or unowned files",
+    )
     ap.add_argument("--no-reload", action="store_true")
     ap.add_argument("--enable-vrm", action="store_true")
     ap.add_argument("--src", type=Path, default=None)
     args = ap.parse_args()
+    if args.check:
+        return check()
     if not any(
-        [args.verify_compile, args.install, args.restore, args.rebuild, args.reinject]
+        [
+            args.verify_compile,
+            args.install,
+            args.restore,
+            args.rebuild,
+            args.reinject,
+            args.pre_upgrade,
+        ]
     ):
         ap.print_help()
         print(
@@ -440,16 +629,26 @@ def main() -> int:
         )
         return 2
     if args.verify_compile:
+        warn_if_hook_stale()
         verify_compile(args.src or find_src())
         print(
             "\nCompile OK. Install with: sudo python3", Path(__file__).name, "--install"
         )
         return 0
     if os.geteuid() != 0 and (
-        args.install or args.restore or args.rebuild or args.reinject
+        args.install
+        or args.restore
+        or args.rebuild
+        or args.reinject
+        or args.pre_upgrade
     ):
         print("Need root", file=sys.stderr)
         return 1
+    if args.pre_upgrade:
+        removed = clear_unowned()
+        if not removed:
+            print("No unowned files to remove")
+        return 0
     src = args.src or find_src()
     load_vrm = want_vrm_enabled(args.enable_vrm)
     if args.restore:
@@ -461,6 +660,7 @@ def main() -> int:
         reinject(src, reload=not args.no_reload, load_vrm=load_vrm)
         return 0
     if args.install:
+        warn_if_hook_stale()
         if MARKER not in src.read_text():
             print("Step 1/3: verify-compile...")
             verify_compile(src)
@@ -469,10 +669,12 @@ def main() -> int:
         else:
             print("Already injected; refreshing include + rebuilding...")
             install_inc(src.parent)
+            patch_makefile(src.parent)
         print("Step 3/3: dkms install...")
         rebuild(src, reload=not args.no_reload, load_vrm=load_vrm)
         return 0
     if args.rebuild:
+        warn_if_hook_stale()
         rebuild(src, reload=not args.no_reload, load_vrm=load_vrm)
         return 0
     return 0
