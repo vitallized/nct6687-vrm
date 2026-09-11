@@ -100,11 +100,11 @@ static int nct_vrm_wait_start_clear(struct nct6687_data* data)
     return -ETIMEDOUT;
 }
 
-static void nct_vrm_invalidate_smbus(void);
+static void nct_vrm_invalidate_smbus(struct nct6687_data* data);
 
 static void nct_vrm_bus_recover(struct nct6687_data* data)
 {
-    nct_vrm_invalidate_smbus();
+    nct_vrm_invalidate_smbus(data);
     nct_vrm_prep_clear(data);
     nct_vrm_esio_write(data, 0x60, 0x00);
 }
@@ -163,16 +163,11 @@ static int nct_vrm_read_word(struct nct6687_data* data, u8 addr, u8 cmd, u16* ou
     return 0;
 }
 
-/* Single-device caches (same assumption as the min/max hist below). */
-static int vrm_smbus_page = -1;
-static u8 vrm_vout_mode_cache[2];
-static bool vrm_vout_mode_valid[2];
-
-static void nct_vrm_invalidate_smbus(void)
+static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
 {
-    vrm_smbus_page = -1;
-    vrm_vout_mode_valid[0] = false;
-    vrm_vout_mode_valid[1] = false;
+    data->vrm_smbus_page = -1;
+    data->vrm_vout_mode_valid[0] = false;
+    data->vrm_vout_mode_valid[1] = false;
 }
 
 /*
@@ -193,32 +188,32 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
     if (page > 1)
         return -EINVAL;
 
-    if (vrm_smbus_page != page) {
+    if (data->vrm_smbus_page != page) {
         if (nct_vrm_write_byte(data, addr, 0x00, page) || nct_vrm_read_byte(data, addr, 0x00, &page_r)) {
-            nct_vrm_invalidate_smbus();
+            nct_vrm_invalidate_smbus(data);
             return -EIO;
         }
         if (page_r != page) {
-            nct_vrm_invalidate_smbus();
+            nct_vrm_invalidate_smbus(data);
             return -EIO;
         }
-        vrm_smbus_page = page;
+        data->vrm_smbus_page = page;
     }
 
-    if (!vrm_vout_mode_valid[page]) {
+    if (!data->vrm_vout_mode_valid[page]) {
         if (nct_vrm_read_byte(data, addr, 0x20, &vout_mode)) {
-            nct_vrm_invalidate_smbus();
+            nct_vrm_invalidate_smbus(data);
             return -EIO;
         }
-        vrm_vout_mode_cache[page] = vout_mode;
-        vrm_vout_mode_valid[page] = true;
+        data->vrm_vout_mode_cache[page] = vout_mode;
+        data->vrm_vout_mode_valid[page] = true;
     } else {
-        vout_mode = vrm_vout_mode_cache[page];
+        vout_mode = data->vrm_vout_mode_cache[page];
     }
 
     /* VOUT, POUT, VIN, TEMP — skip IOUT unless P/V is unusable. */
     if (nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8d, &temp)) {
-        nct_vrm_invalidate_smbus();
+        nct_vrm_invalidate_smbus(data);
         return -EIO;
     }
 
@@ -229,7 +224,7 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
         i_ma = (p_mw * 1000L) / v_mv;
     } else {
         if (nct_vrm_read_word(data, addr, 0x8c, &iout)) {
-            nct_vrm_invalidate_smbus();
+            nct_vrm_invalidate_smbus(data);
             return -EIO;
         }
         i_ma = nct_vrm_decode_iout_fallback_ma(iout);
@@ -243,20 +238,7 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
     return 0;
 }
 
-/* Software min/max since module load (same idea as stock nct6687 voltage[1]/[2]). */
-static bool vrm_hist_init;
-static long vrm_vout_min, vrm_vout_max;
-static long vrm_vin_min, vrm_vin_max;
-static long vrm_iout_min, vrm_iout_max;
-static long vrm_pout_min, vrm_pout_max;
-static long vrm_temp_min, vrm_temp_max;
-static bool vrm_gt_hist_init;
-static long vrm_gt_vout_min, vrm_gt_vout_max;
-static long vrm_gt_vin_min, vrm_gt_vin_max;
-static long vrm_gt_iout_min, vrm_gt_iout_max;
-static long vrm_gt_pout_min, vrm_gt_pout_max;
-static long vrm_gt_temp_min, vrm_gt_temp_max;
-
+/* Software min/max per device (same idea as stock nct6687 voltage[1]/[2]). */
 static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
 {
     if (first)
@@ -337,14 +319,14 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     data->vrm_valid = true;
     data->vrm_last_updated = jiffies;
     {
-        bool first = !vrm_hist_init;
+        bool first = !data->vrm_hist_init;
 
-        nct_vrm_hist_point(&vrm_vout_min, &vrm_vout_max, vout_mv, first);
-        nct_vrm_hist_point(&vrm_vin_min, &vrm_vin_max, vin_mv, first);
-        nct_vrm_hist_point(&vrm_iout_min, &vrm_iout_max, iout_ma, first);
-        nct_vrm_hist_point(&vrm_pout_min, &vrm_pout_max, pout_uw, first);
-        nct_vrm_hist_point(&vrm_temp_min, &vrm_temp_max, temp_mc, first);
-        vrm_hist_init = true;
+        nct_vrm_hist_point(&data->vrm_vout_min, &data->vrm_vout_max, vout_mv, first);
+        nct_vrm_hist_point(&data->vrm_vin_min, &data->vrm_vin_max, vin_mv, first);
+        nct_vrm_hist_point(&data->vrm_iout_min, &data->vrm_iout_max, iout_ma, first);
+        nct_vrm_hist_point(&data->vrm_pout_min, &data->vrm_pout_max, pout_uw, first);
+        nct_vrm_hist_point(&data->vrm_temp_min, &data->vrm_temp_max, temp_mc, first);
+        data->vrm_hist_init = true;
     }
 
     if (vrm_gt) {
@@ -353,7 +335,7 @@ static void nct6687_update_vrm(struct nct6687_data* data)
             data->vrm_gt_valid = false;
             nct_vrm_bus_recover(data);
         } else {
-            bool first = !vrm_gt_hist_init;
+            bool first = !data->vrm_gt_hist_init;
 
             data->vrm_gt_vout = vout_mv;
             data->vrm_gt_vin = vin_mv;
@@ -361,12 +343,12 @@ static void nct6687_update_vrm(struct nct6687_data* data)
             data->vrm_gt_pout = pout_uw;
             data->vrm_gt_temp = temp_mc;
             data->vrm_gt_valid = true;
-            nct_vrm_hist_point(&vrm_gt_vout_min, &vrm_gt_vout_max, vout_mv, first);
-            nct_vrm_hist_point(&vrm_gt_vin_min, &vrm_gt_vin_max, vin_mv, first);
-            nct_vrm_hist_point(&vrm_gt_iout_min, &vrm_gt_iout_max, iout_ma, first);
-            nct_vrm_hist_point(&vrm_gt_pout_min, &vrm_gt_pout_max, pout_uw, first);
-            nct_vrm_hist_point(&vrm_gt_temp_min, &vrm_gt_temp_max, temp_mc, first);
-            vrm_gt_hist_init = true;
+            nct_vrm_hist_point(&data->vrm_gt_vout_min, &data->vrm_gt_vout_max, vout_mv, first);
+            nct_vrm_hist_point(&data->vrm_gt_vin_min, &data->vrm_gt_vin_max, vin_mv, first);
+            nct_vrm_hist_point(&data->vrm_gt_iout_min, &data->vrm_gt_iout_max, iout_ma, first);
+            nct_vrm_hist_point(&data->vrm_gt_pout_min, &data->vrm_gt_pout_max, pout_uw, first);
+            nct_vrm_hist_point(&data->vrm_gt_temp_min, &data->vrm_gt_temp_max, temp_mc, first);
+            data->vrm_gt_hist_init = true;
             nct_vrm_esio_write(data, 0x60, 0x00);
         }
     } else {
@@ -453,82 +435,92 @@ static ssize_t show_vrm_temp(struct device* dev, struct device_attribute* attr, 
 
 static ssize_t show_vrm_vout_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_vout_min);
+    return sprintf(buf, "%ld\n", data->vrm_vout_min);
 }
 
 static ssize_t show_vrm_vout_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_vout_max);
+    return sprintf(buf, "%ld\n", data->vrm_vout_max);
 }
 
 static ssize_t show_vrm_vin_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_vin_min);
+    return sprintf(buf, "%ld\n", data->vrm_vin_min);
 }
 
 static ssize_t show_vrm_vin_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_vin_max);
+    return sprintf(buf, "%ld\n", data->vrm_vin_max);
 }
 
 static ssize_t show_vrm_iout_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_iout_min);
+    return sprintf(buf, "%ld\n", data->vrm_iout_min);
 }
 
 static ssize_t show_vrm_iout_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_iout_max);
+    return sprintf(buf, "%ld\n", data->vrm_iout_max);
 }
 
 static ssize_t show_vrm_pout_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_pout_min);
+    return sprintf(buf, "%ld\n", data->vrm_pout_min);
 }
 
 static ssize_t show_vrm_pout_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_pout_max);
+    return sprintf(buf, "%ld\n", data->vrm_pout_max);
 }
 
 static ssize_t show_vrm_temp_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_temp_min);
+    return sprintf(buf, "%ld\n", data->vrm_temp_min);
 }
 
 static ssize_t show_vrm_temp_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_temp_max);
+    return sprintf(buf, "%ld\n", data->vrm_temp_max);
 }
 
 static ssize_t show_vrm_gt_vout(struct device* dev, struct device_attribute* attr, char* buf)
@@ -578,82 +570,92 @@ static ssize_t show_vrm_gt_temp(struct device* dev, struct device_attribute* att
 
 static ssize_t show_vrm_gt_vout_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_vout_min);
+    return sprintf(buf, "%ld\n", data->vrm_gt_vout_min);
 }
 
 static ssize_t show_vrm_gt_vout_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_vout_max);
+    return sprintf(buf, "%ld\n", data->vrm_gt_vout_max);
 }
 
 static ssize_t show_vrm_gt_vin_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_vin_min);
+    return sprintf(buf, "%ld\n", data->vrm_gt_vin_min);
 }
 
 static ssize_t show_vrm_gt_vin_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_vin_max);
+    return sprintf(buf, "%ld\n", data->vrm_gt_vin_max);
 }
 
 static ssize_t show_vrm_gt_iout_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_iout_min);
+    return sprintf(buf, "%ld\n", data->vrm_gt_iout_min);
 }
 
 static ssize_t show_vrm_gt_iout_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_iout_max);
+    return sprintf(buf, "%ld\n", data->vrm_gt_iout_max);
 }
 
 static ssize_t show_vrm_gt_pout_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_pout_min);
+    return sprintf(buf, "%ld\n", data->vrm_gt_pout_min);
 }
 
 static ssize_t show_vrm_gt_pout_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_pout_max);
+    return sprintf(buf, "%ld\n", data->vrm_gt_pout_max);
 }
 
 static ssize_t show_vrm_gt_temp_min(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_temp_min);
+    return sprintf(buf, "%ld\n", data->vrm_gt_temp_min);
 }
 
 static ssize_t show_vrm_gt_temp_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    nct_vrm_touch_and_update(dev);
-    if (!vrm_gt_hist_init)
+    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+
+    if (!data->vrm_gt_hist_init)
         return -ENODATA;
-    return sprintf(buf, "%ld\n", vrm_gt_temp_max);
+    return sprintf(buf, "%ld\n", data->vrm_gt_temp_max);
 }
 
 static ssize_t show_vrm_label_vout(struct device* dev, struct device_attribute* attr, char* buf)
