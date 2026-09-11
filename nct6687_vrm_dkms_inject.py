@@ -2,8 +2,9 @@
 """Inject eSIO PMBus VRM hwmon attrs into nct6687 DKMS sources, then rebuild.
 
 Bulk VRM logic lives in dkms/nct6687_vrm.inc.c (copied beside nct6687.c and
-#include'd). This script only splices small hooks into nct6687.c so upstream
-driver churn breaks a few anchors — not a 500-line embedded blob.
+#include'd), with raw→millisi math in nct6687_vrm_decode.h. This script only
+splices small hooks into nct6687.c so upstream driver churn breaks a few
+anchors — not a 500-line embedded blob.
 
 Safety: --verify-compile; --install loads vrm=0; update_vrm outside update_lock;
 GT hidden unless vrm_gt=1; modprobe -r must succeed.
@@ -24,6 +25,8 @@ from pathlib import Path
 # Present in the #include splice and inside nct6687_vrm.inc.c
 MARKER = "NCT6687_VRM_PMBUS_INJECT"
 INC_NAME = "nct6687_vrm.inc.c"
+DECODE_NAME = "nct6687_vrm_decode.h"
+VRM_FILES = (INC_NAME, DECODE_NAME)
 REPO_ROOT = Path(__file__).resolve().parent
 
 STRUCT_FIELDS = """
@@ -85,18 +88,22 @@ INSTALLED_LIB = Path("/usr/local/lib/nct6687-vrm")
 MINIMAL_KBUILD = "obj-m += nct6687.o\n"
 
 
-def find_inc() -> Path:
+def find_vrm_file(name: str) -> Path:
     candidates = [
-        REPO_ROOT / "dkms" / INC_NAME,
-        REPO_ROOT / INC_NAME,
-        INSTALLED_LIB / INC_NAME,
+        REPO_ROOT / "dkms" / name,
+        REPO_ROOT / name,
+        INSTALLED_LIB / name,
     ]
     for p in candidates:
         if p.is_file():
             return p
     raise SystemExit(
-        f"Missing {INC_NAME} (tried: {', '.join(str(c) for c in candidates)})"
+        f"Missing {name} (tried: {', '.join(str(c) for c in candidates)})"
     )
+
+
+def find_inc() -> Path:
+    return find_vrm_file(INC_NAME)
 
 
 def _pacman_owned_files(pkg_prefix: str = "nct6687d-dkms-git-") -> set[str]:
@@ -172,7 +179,7 @@ def unowned_toplevel(pkg_dir: Path) -> list[Path]:
         rel = child.as_posix().lstrip("/")
         if owned and rel in owned:
             continue
-        if not owned and child.name != INC_NAME and not child.name.endswith(".pre-vrm"):
+        if not owned and child.name not in VRM_FILES and not child.name.endswith(".pre-vrm"):
             # No files db — only drop extras we created, never Kbuild/etc.
             continue
         extras.append(child)
@@ -223,10 +230,12 @@ def installed_kernels(pname: str, pver: str) -> list[str]:
 
 
 def install_inc(pkg_dir: Path) -> Path:
-    """Copy/refresh the VRM include next to nct6687.c."""
+    """Copy/refresh VRM sources next to nct6687.c."""
     dst = pkg_dir / INC_NAME
-    shutil.copy2(find_inc(), dst)
-    print("Installed", dst)
+    for name in VRM_FILES:
+        out = pkg_dir / name
+        shutil.copy2(find_vrm_file(name), out)
+        print("Installed", out)
     return dst
 
 
@@ -235,7 +244,7 @@ def patch_makefile(pkg_dir: Path) -> None:
     mf = pkg_dir / "Makefile"
     if not mf.is_file():
         return
-    extra = [INC_NAME]
+    extra = list(VRM_FILES)
     if (pkg_dir / "Kbuild").is_file():
         extra.insert(0, "Kbuild")
     new_text, changed = patched_makefile_text(mf.read_text(), extra)
@@ -332,7 +341,7 @@ def inject(src: Path) -> None:
     patch_makefile(src.parent)
     text = src.read_text()
     if MARKER in text:
-        print("Already injected (hooks); refreshed", INC_NAME)
+        print("Already injected (hooks); refreshed", ", ".join(VRM_FILES))
         return
     bak = Path(str(src) + ".pre-vrm")
     if not bak.exists():
@@ -352,10 +361,11 @@ def restore(src: Path) -> None:
     if mf_bak.exists():
         shutil.copy2(mf_bak, src.parent / "Makefile")
         print("Restored", src.parent / "Makefile")
-    inc = src.parent / INC_NAME
-    if inc.exists():
-        inc.unlink()
-        print("Removed", inc)
+    for name in VRM_FILES:
+        extra = src.parent / name
+        if extra.exists():
+            extra.unlink()
+            print("Removed", extra)
 
 
 def verify_compile(src: Path) -> Path:
@@ -388,7 +398,8 @@ def verify_compile(src: Path) -> Path:
         (build_root / "nct6687.c").write_text(raw)
         # Prefer the checkout include so --verify-compile tests local edits,
         # not a stale copy sitting in /usr/src.
-        shutil.copy2(find_inc(), build_root / INC_NAME)
+        for name in VRM_FILES:
+            shutil.copy2(find_vrm_file(name), build_root / name)
     elif MARKER in raw:
         # Legacy single-file inject — rebuild from stock backup if present
         bak = Path(str(src) + ".pre-vrm")
@@ -529,7 +540,7 @@ def check() -> int:
     extras = unowned_toplevel(src.parent)
     expected, unexpected = [], []
     for p in extras:
-        if p.name == INC_NAME or p.name.endswith(".pre-vrm"):
+        if p.name in VRM_FILES or p.name.endswith(".pre-vrm"):
             expected.append(p)
         else:
             unexpected.append(p)
@@ -553,11 +564,15 @@ def check() -> int:
         py_stale = installed_py.read_bytes() != here.read_bytes()
         stale = stale or py_stale
         print("Installed hook copy:", "STALE" if py_stale else "ok")
-        inc_i = INSTALLED_LIB / INC_NAME
-        if inc_i.is_file():
-            inc_stale = inc_i.read_bytes() != find_inc().read_bytes()
-            stale = stale or inc_stale
-            print("Installed include:", "STALE" if inc_stale else "ok")
+        for name in VRM_FILES:
+            installed = INSTALLED_LIB / name
+            if installed.is_file():
+                file_stale = installed.read_bytes() != find_vrm_file(name).read_bytes()
+                stale = stale or file_stale
+                print(f"Installed {name}:", "STALE" if file_stale else "ok")
+            else:
+                stale = True
+                print(f"Installed {name}: missing")
     else:
         print("Installed hook copy: missing (run pacman-hook/install.sh)")
         stale = True

@@ -18,14 +18,20 @@ if [[ ! -f "$INJECT_SRC" ]]; then
 fi
 
 INC_SRC="$REPO/dkms/nct6687_vrm.inc.c"
+DECODE_SRC="$REPO/dkms/nct6687_vrm_decode.h"
 if [[ ! -f "$INC_SRC" ]]; then
 	echo "Missing VRM include: $INC_SRC" >&2
+	exit 1
+fi
+if [[ ! -f "$DECODE_SRC" ]]; then
+	echo "Missing VRM decode header: $DECODE_SRC" >&2
 	exit 1
 fi
 
 install -d "$LIB"
 install -m 644 "$INJECT_SRC" "$LIB/nct6687_vrm_dkms_inject.py"
 install -m 644 "$INC_SRC" "$LIB/nct6687_vrm.inc.c"
+install -m 644 "$DECODE_SRC" "$LIB/nct6687_vrm_decode.h"
 install -m 644 "$ROOT/refresh-from-source.sh" "$LIB/refresh-from-source.sh"
 printf 'SOURCE_REPO=%s\n' "$REPO" >"$LIB/source.env"
 chmod 644 "$LIB/source.env"
@@ -39,6 +45,7 @@ install -m 644 "$ROOT/nct6687-vrm.conf" /etc/modprobe.d/nct6687-vrm.conf
 echo "Installed:"
 echo "  $LIB/nct6687_vrm_dkms_inject.py"
 echo "  $LIB/nct6687_vrm.inc.c"
+echo "  $LIB/nct6687_vrm_decode.h"
 echo "  $LIB/refresh-from-source.sh"
 echo "  $LIB/source.env  (SOURCE_REPO=$REPO)"
 echo "  /usr/local/sbin/nct6687-vrm-reinject"

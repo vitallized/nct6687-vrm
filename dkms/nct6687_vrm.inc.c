@@ -32,14 +32,7 @@ MODULE_PARM_DESC(vrm_vout_exp, "Fallback LINEAR16 exp if VOUT_MODE unknown (-16.
 #define NCT_VRM_PROTO_RB 0x82
 #define NCT_VRM_PROTO_RW 0x83
 
-static int nct_vrm_clamp_exp(int exp)
-{
-    if (exp < -16)
-        return -16;
-    if (exp > 15)
-        return 15;
-    return exp;
-}
+#include "nct6687_vrm_decode.h"
 
 /*
  * Caller must hold data->EC_io_lock.
@@ -170,51 +163,6 @@ static int nct_vrm_read_word(struct nct6687_data* data, u8 addr, u8 cmd, u16* ou
     return 0;
 }
 
-static long nct_vrm_linear11_milli(u16 raw)
-{
-    int exp = (raw >> 11) & 0x1f;
-    int mant = raw & 0x7ff;
-    long abs_m;
-    bool neg;
-
-    if (exp >= 16)
-        exp -= 32;
-    if (mant >= 1024)
-        mant -= 2048;
-
-    neg = mant < 0;
-    abs_m = (neg ? -(long)mant : (long)mant) * 1000L;
-    if (exp >= 0) {
-        exp = nct_vrm_clamp_exp(exp);
-        if (exp > 0)
-            abs_m <<= exp;
-    } else {
-        abs_m >>= nct_vrm_clamp_exp(-exp);
-    }
-    return neg ? -abs_m : abs_m;
-}
-
-static long nct_vrm_decode_vout_mv(u16 vout, u8 vout_mode)
-{
-    int mode = (vout_mode >> 5) & 0x7;
-    int exp;
-
-    if (mode == 2)
-        return (long)vout; /* Direct R=3 → mV = raw */
-
-    if (mode == 0) {
-        exp = vout_mode & 0x1f;
-        if (exp >= 16)
-            exp -= 32;
-    } else {
-        exp = vrm_vout_exp;
-    }
-    exp = nct_vrm_clamp_exp(exp);
-    if (exp >= 0)
-        return ((long)vout * 1000L) << exp;
-    return ((long)vout * 1000L) >> (-exp);
-}
-
 /* Single-device caches (same assumption as the min/max hist below). */
 static int vrm_smbus_page = -1;
 static u8 vrm_vout_mode_cache[2];
@@ -267,7 +215,7 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
         return -EIO;
     }
 
-    v_mv = nct_vrm_decode_vout_mv(vout, vout_mode);
+    v_mv = nct_vrm_decode_vout_mv(vout, vout_mode, vrm_vout_exp);
     p_mw = nct_vrm_linear11_milli(pout);
     t_mc = nct_vrm_linear11_milli(temp);
     if (v_mv > 200) {
@@ -277,11 +225,11 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
             nct_vrm_invalidate_smbus();
             return -EIO;
         }
-        i_ma = ((long)iout * 1000L) >> 3;
+        i_ma = nct_vrm_decode_iout_fallback_ma(iout);
     }
 
     *vout_mv = v_mv;
-    *vin_mv = (long)vin * 10L;
+    *vin_mv = nct_vrm_decode_vin_mv(vin);
     *iout_ma = i_ma;
     *pout_uw = p_mw * 1000L;
     *temp_mc = t_mc;

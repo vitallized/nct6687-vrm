@@ -27,6 +27,13 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from nct6687_vrm_decode import (
+    decode_iout_fallback_ma,
+    decode_vin_mv,
+    decode_vout,
+    linear11,
+)
+
 DEFAULT_BASE = 0xA20
 SMB_EN, SMB_START, SMB_CLEAR = 0x80, 0x40, 0x08
 PROTO_WRITE_BYTE, PROTO_BYTE, PROTO_WORD = 0x02, 0x82, 0x83
@@ -176,37 +183,6 @@ def smbus_read(p: Ports, addr8: int, cmd: int, word: bool) -> tuple[int, bytes]:
     return sts, bytes([lo, hi])
 
 
-def linear11(raw: int) -> float:
-    raw &= 0xFFFF
-    exp = (raw >> 11) & 0x1F
-    if exp >= 16:
-        exp -= 32
-    mant = raw & 0x7FF
-    if mant >= 1024:
-        mant -= 2048
-    return mant * (2.0**exp)
-
-
-def linear16(raw: int, exp: int) -> float:
-    return (raw & 0xFFFF) * (2.0**exp)
-
-
-def decode_vout(raw: int, vout_mode: int, fallback_exp: int) -> tuple[float, str]:
-    """Return (volts, method). Respects PMBus VOUT_MODE when possible."""
-    mode = (vout_mode >> 5) & 0x7
-    if mode == 2:
-        # Direct — Renesas DMPVR2 uses R=3 → mV = raw
-        return (raw & 0xFFFF) * 0.001, "direct-R3"
-    if mode == 0:
-        exp = vout_mode & 0x1F
-        if exp >= 16:
-            exp -= 32
-        exp = max(-16, min(15, exp))
-        return linear16(raw, exp), f"linear16-mode(exp={exp})"
-    exp = max(-16, min(15, fallback_exp))
-    return linear16(raw, exp), f"linear16-fallback(exp={exp})"
-
-
 @dataclass
 class VrmSample:
     addr: int
@@ -297,10 +273,9 @@ def read_vrm(
             iout_a = pout_w / vout_v
             iout_method = "P/V"
         else:
-            iout_a = linear16(iout, -3)
+            iout_a = decode_iout_fallback_ma(iout) / 1000.0
             iout_method = "linear16-N=-3"
-        # Renesas DMPVR2 Direct VIN: m=1,b=0,R=2 → 10 mV/LSB
-        vin_v = vin * 0.01
+        vin_v = decode_vin_mv(vin) / 1000.0
 
         return VrmSample(
             addr=addr,
