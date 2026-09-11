@@ -388,378 +388,179 @@ static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, c
     return sprintf(buf, "%ld %ld %ld\n", data->vrm_vout, data->vrm_iout, data->vrm_pout);
 }
 
-static ssize_t show_vrm_vout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+/*
+ * One row per hwmon channel. nct_vrm_show / is_visible key off
+ * SENSOR_DEVICE_ATTR_2 nr=channel, index=stat. Labels live here so adding a
+ * rail is a table row plus the attr declarations — not a new show function.
+ */
+#define NCT_VRM_F_GT 1
 
-    if (!data->vrm_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_vout);
+enum nct_vrm_stat {
+    NCT_VRM_INPUT,
+    NCT_VRM_MIN,
+    NCT_VRM_MAX,
+    NCT_VRM_LABEL,
+};
+
+enum nct_vrm_ch {
+    NCT_VRM_CPU_VOUT,
+    NCT_VRM_CPU_VIN,
+    NCT_VRM_CPU_IOUT,
+    NCT_VRM_CPU_POUT,
+    NCT_VRM_CPU_TEMP,
+    NCT_VRM_GT_VOUT,
+    NCT_VRM_GT_VIN,
+    NCT_VRM_GT_IOUT,
+    NCT_VRM_GT_POUT,
+    NCT_VRM_GT_TEMP,
+};
+
+struct nct_vrm_chan {
+    const char* label;
+    u8 flags;
+    u16 value_off;
+    u16 min_off;
+    u16 max_off;
+    u16 hist_init_off;
+};
+
+#define NCT_VRM_CHAN(_label, _flags, _field, _min, _max, _init) \
+    { \
+        .label = (_label), \
+        .flags = (_flags), \
+        .value_off = offsetof(struct nct6687_data, _field), \
+        .min_off = offsetof(struct nct6687_data, _min), \
+        .max_off = offsetof(struct nct6687_data, _max), \
+        .hist_init_off = offsetof(struct nct6687_data, _init), \
+    }
+
+static const struct nct_vrm_chan nct_vrm_chans[] = {
+    [NCT_VRM_CPU_VOUT] = NCT_VRM_CHAN("VRM CPU VOUT", 0,
+        vrm_vout, vrm_vout_min, vrm_vout_max, vrm_hist_init),
+    [NCT_VRM_CPU_VIN] = NCT_VRM_CHAN("VRM CPU VIN", 0,
+        vrm_vin, vrm_vin_min, vrm_vin_max, vrm_hist_init),
+    [NCT_VRM_CPU_IOUT] = NCT_VRM_CHAN("VRM CPU IOUT", 0,
+        vrm_iout, vrm_iout_min, vrm_iout_max, vrm_hist_init),
+    [NCT_VRM_CPU_POUT] = NCT_VRM_CHAN("VRM CPU POUT", 0,
+        vrm_pout, vrm_pout_min, vrm_pout_max, vrm_hist_init),
+    [NCT_VRM_CPU_TEMP] = NCT_VRM_CHAN("VRM CPU TEMP", 0,
+        vrm_temp, vrm_temp_min, vrm_temp_max, vrm_hist_init),
+    [NCT_VRM_GT_VOUT] = NCT_VRM_CHAN("VRM GT VOUT", NCT_VRM_F_GT,
+        vrm_gt_vout, vrm_gt_vout_min, vrm_gt_vout_max, vrm_gt_hist_init),
+    [NCT_VRM_GT_VIN] = NCT_VRM_CHAN("VRM GT VIN", NCT_VRM_F_GT,
+        vrm_gt_vin, vrm_gt_vin_min, vrm_gt_vin_max, vrm_gt_hist_init),
+    [NCT_VRM_GT_IOUT] = NCT_VRM_CHAN("VRM GT IOUT", NCT_VRM_F_GT,
+        vrm_gt_iout, vrm_gt_iout_min, vrm_gt_iout_max, vrm_gt_hist_init),
+    [NCT_VRM_GT_POUT] = NCT_VRM_CHAN("VRM GT POUT", NCT_VRM_F_GT,
+        vrm_gt_pout, vrm_gt_pout_min, vrm_gt_pout_max, vrm_gt_hist_init),
+    [NCT_VRM_GT_TEMP] = NCT_VRM_CHAN("VRM GT TEMP", NCT_VRM_F_GT,
+        vrm_gt_temp, vrm_gt_temp_min, vrm_gt_temp_max, vrm_gt_hist_init),
+};
+
+static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, char* buf)
+{
+    struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
+    const struct nct_vrm_chan* ch;
+    struct nct6687_data* data;
+    long val;
+    bool valid;
+
+    if (sattr->nr >= ARRAY_SIZE(nct_vrm_chans))
+        return -EINVAL;
+    ch = &nct_vrm_chans[sattr->nr];
+
+    if (sattr->index == NCT_VRM_LABEL)
+        return sprintf(buf, "%s\n", ch->label);
+
+    data = nct_vrm_touch_and_update(dev);
+
+    switch (sattr->index) {
+    case NCT_VRM_INPUT:
+        valid = (ch->flags & NCT_VRM_F_GT) ? data->vrm_gt_valid : data->vrm_valid;
+        if (!valid)
+            return -ENODATA;
+        val = *(long*)((char*)data + ch->value_off);
+        break;
+    case NCT_VRM_MIN:
+        if (!*(bool*)((char*)data + ch->hist_init_off))
+            return -ENODATA;
+        val = *(long*)((char*)data + ch->min_off);
+        break;
+    case NCT_VRM_MAX:
+        if (!*(bool*)((char*)data + ch->hist_init_off))
+            return -ENODATA;
+        val = *(long*)((char*)data + ch->max_off);
+        break;
+    default:
+        return -EINVAL;
+    }
+    return sprintf(buf, "%ld\n", val);
 }
 
-static ssize_t show_vrm_vin(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+#define NCT_VRM_ATTR(_name, _ch, _stat) \
+    static SENSOR_DEVICE_ATTR_2(_name, 0444, nct_vrm_show, NULL, _ch, _stat)
+
+static SENSOR_DEVICE_ATTR_2(vrm_cpu, 0444, vrm_cpu_show, NULL,
+    NCT_VRM_CPU_VOUT, NCT_VRM_INPUT);
+NCT_VRM_ATTR(in20_input, NCT_VRM_CPU_VOUT, NCT_VRM_INPUT);
+NCT_VRM_ATTR(in20_label, NCT_VRM_CPU_VOUT, NCT_VRM_LABEL);
+NCT_VRM_ATTR(in20_min, NCT_VRM_CPU_VOUT, NCT_VRM_MIN);
+NCT_VRM_ATTR(in20_max, NCT_VRM_CPU_VOUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(in21_input, NCT_VRM_CPU_VIN, NCT_VRM_INPUT);
+NCT_VRM_ATTR(in21_label, NCT_VRM_CPU_VIN, NCT_VRM_LABEL);
+NCT_VRM_ATTR(in21_min, NCT_VRM_CPU_VIN, NCT_VRM_MIN);
+NCT_VRM_ATTR(in21_max, NCT_VRM_CPU_VIN, NCT_VRM_MAX);
+NCT_VRM_ATTR(curr1_input, NCT_VRM_CPU_IOUT, NCT_VRM_INPUT);
+NCT_VRM_ATTR(curr1_label, NCT_VRM_CPU_IOUT, NCT_VRM_LABEL);
+NCT_VRM_ATTR(curr1_min, NCT_VRM_CPU_IOUT, NCT_VRM_MIN);
+NCT_VRM_ATTR(curr1_max, NCT_VRM_CPU_IOUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(power1_input, NCT_VRM_CPU_POUT, NCT_VRM_INPUT);
+NCT_VRM_ATTR(power1_label, NCT_VRM_CPU_POUT, NCT_VRM_LABEL);
+NCT_VRM_ATTR(power1_min, NCT_VRM_CPU_POUT, NCT_VRM_MIN);
+NCT_VRM_ATTR(power1_max, NCT_VRM_CPU_POUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(temp20_input, NCT_VRM_CPU_TEMP, NCT_VRM_INPUT);
+NCT_VRM_ATTR(temp20_label, NCT_VRM_CPU_TEMP, NCT_VRM_LABEL);
+NCT_VRM_ATTR(temp20_min, NCT_VRM_CPU_TEMP, NCT_VRM_MIN);
+NCT_VRM_ATTR(temp20_max, NCT_VRM_CPU_TEMP, NCT_VRM_MAX);
+NCT_VRM_ATTR(in22_input, NCT_VRM_GT_VOUT, NCT_VRM_INPUT);
+NCT_VRM_ATTR(in22_label, NCT_VRM_GT_VOUT, NCT_VRM_LABEL);
+NCT_VRM_ATTR(in22_min, NCT_VRM_GT_VOUT, NCT_VRM_MIN);
+NCT_VRM_ATTR(in22_max, NCT_VRM_GT_VOUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(in23_input, NCT_VRM_GT_VIN, NCT_VRM_INPUT);
+NCT_VRM_ATTR(in23_label, NCT_VRM_GT_VIN, NCT_VRM_LABEL);
+NCT_VRM_ATTR(in23_min, NCT_VRM_GT_VIN, NCT_VRM_MIN);
+NCT_VRM_ATTR(in23_max, NCT_VRM_GT_VIN, NCT_VRM_MAX);
+NCT_VRM_ATTR(curr2_input, NCT_VRM_GT_IOUT, NCT_VRM_INPUT);
+NCT_VRM_ATTR(curr2_label, NCT_VRM_GT_IOUT, NCT_VRM_LABEL);
+NCT_VRM_ATTR(curr2_min, NCT_VRM_GT_IOUT, NCT_VRM_MIN);
+NCT_VRM_ATTR(curr2_max, NCT_VRM_GT_IOUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(power2_input, NCT_VRM_GT_POUT, NCT_VRM_INPUT);
+NCT_VRM_ATTR(power2_label, NCT_VRM_GT_POUT, NCT_VRM_LABEL);
+NCT_VRM_ATTR(power2_min, NCT_VRM_GT_POUT, NCT_VRM_MIN);
+NCT_VRM_ATTR(power2_max, NCT_VRM_GT_POUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(temp21_input, NCT_VRM_GT_TEMP, NCT_VRM_INPUT);
+NCT_VRM_ATTR(temp21_label, NCT_VRM_GT_TEMP, NCT_VRM_LABEL);
+NCT_VRM_ATTR(temp21_min, NCT_VRM_GT_TEMP, NCT_VRM_MIN);
+NCT_VRM_ATTR(temp21_max, NCT_VRM_GT_TEMP, NCT_VRM_MAX);
 
-    if (!data->vrm_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_vin);
-}
-
-static ssize_t show_vrm_iout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_iout);
-}
-
-static ssize_t show_vrm_pout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_pout);
-}
-
-static ssize_t show_vrm_temp(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_temp);
-}
-
-static ssize_t show_vrm_vout_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_vout_min);
-}
-
-static ssize_t show_vrm_vout_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_vout_max);
-}
-
-static ssize_t show_vrm_vin_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_vin_min);
-}
-
-static ssize_t show_vrm_vin_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_vin_max);
-}
-
-static ssize_t show_vrm_iout_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_iout_min);
-}
-
-static ssize_t show_vrm_iout_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_iout_max);
-}
-
-static ssize_t show_vrm_pout_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_pout_min);
-}
-
-static ssize_t show_vrm_pout_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_pout_max);
-}
-
-static ssize_t show_vrm_temp_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_temp_min);
-}
-
-static ssize_t show_vrm_temp_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_temp_max);
-}
-
-static ssize_t show_vrm_gt_vout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_vout);
-}
-
-static ssize_t show_vrm_gt_vin(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_vin);
-}
-
-static ssize_t show_vrm_gt_iout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_iout);
-}
-
-static ssize_t show_vrm_gt_pout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_pout);
-}
-
-static ssize_t show_vrm_gt_temp(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_valid)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_temp);
-}
-
-static ssize_t show_vrm_gt_vout_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_vout_min);
-}
-
-static ssize_t show_vrm_gt_vout_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_vout_max);
-}
-
-static ssize_t show_vrm_gt_vin_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_vin_min);
-}
-
-static ssize_t show_vrm_gt_vin_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_vin_max);
-}
-
-static ssize_t show_vrm_gt_iout_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_iout_min);
-}
-
-static ssize_t show_vrm_gt_iout_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_iout_max);
-}
-
-static ssize_t show_vrm_gt_pout_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_pout_min);
-}
-
-static ssize_t show_vrm_gt_pout_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_pout_max);
-}
-
-static ssize_t show_vrm_gt_temp_min(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_temp_min);
-}
-
-static ssize_t show_vrm_gt_temp_max(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-
-    if (!data->vrm_gt_hist_init)
-        return -ENODATA;
-    return sprintf(buf, "%ld\n", data->vrm_gt_temp_max);
-}
-
-static ssize_t show_vrm_label_vout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM CPU VOUT\n");
-}
-
-static ssize_t show_vrm_label_vin(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM CPU VIN\n");
-}
-
-static ssize_t show_vrm_label_iout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM CPU IOUT\n");
-}
-
-static ssize_t show_vrm_label_pout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM CPU POUT\n");
-}
-
-static ssize_t show_vrm_label_temp(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM CPU TEMP\n");
-}
-
-static ssize_t show_vrm_label_gt_vout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM GT VOUT\n");
-}
-
-static ssize_t show_vrm_label_gt_vin(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM GT VIN\n");
-}
-
-static ssize_t show_vrm_label_gt_iout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM GT IOUT\n");
-}
-
-static ssize_t show_vrm_label_gt_pout(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM GT POUT\n");
-}
-
-static ssize_t show_vrm_label_gt_temp(struct device* dev, struct device_attribute* attr, char* buf)
-{
-    return sprintf(buf, "VRM GT TEMP\n");
-}
-
-static DEVICE_ATTR_RO(vrm_cpu);
-static SENSOR_DEVICE_ATTR(in20_input, 0444, show_vrm_vout, NULL, 0);
-static SENSOR_DEVICE_ATTR(in20_label, 0444, show_vrm_label_vout, NULL, 0);
-static SENSOR_DEVICE_ATTR(in20_min, 0444, show_vrm_vout_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(in20_max, 0444, show_vrm_vout_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(in21_input, 0444, show_vrm_vin, NULL, 0);
-static SENSOR_DEVICE_ATTR(in21_label, 0444, show_vrm_label_vin, NULL, 0);
-static SENSOR_DEVICE_ATTR(in21_min, 0444, show_vrm_vin_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(in21_max, 0444, show_vrm_vin_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(curr1_input, 0444, show_vrm_iout, NULL, 0);
-static SENSOR_DEVICE_ATTR(curr1_label, 0444, show_vrm_label_iout, NULL, 0);
-static SENSOR_DEVICE_ATTR(curr1_min, 0444, show_vrm_iout_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(curr1_max, 0444, show_vrm_iout_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(power1_input, 0444, show_vrm_pout, NULL, 0);
-static SENSOR_DEVICE_ATTR(power1_label, 0444, show_vrm_label_pout, NULL, 0);
-static SENSOR_DEVICE_ATTR(power1_min, 0444, show_vrm_pout_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(power1_max, 0444, show_vrm_pout_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp20_input, 0444, show_vrm_temp, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp20_label, 0444, show_vrm_label_temp, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp20_min, 0444, show_vrm_temp_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp20_max, 0444, show_vrm_temp_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(in22_input, 0444, show_vrm_gt_vout, NULL, 0);
-static SENSOR_DEVICE_ATTR(in22_label, 0444, show_vrm_label_gt_vout, NULL, 0);
-static SENSOR_DEVICE_ATTR(in22_min, 0444, show_vrm_gt_vout_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(in22_max, 0444, show_vrm_gt_vout_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(in23_input, 0444, show_vrm_gt_vin, NULL, 0);
-static SENSOR_DEVICE_ATTR(in23_label, 0444, show_vrm_label_gt_vin, NULL, 0);
-static SENSOR_DEVICE_ATTR(in23_min, 0444, show_vrm_gt_vin_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(in23_max, 0444, show_vrm_gt_vin_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(curr2_input, 0444, show_vrm_gt_iout, NULL, 0);
-static SENSOR_DEVICE_ATTR(curr2_label, 0444, show_vrm_label_gt_iout, NULL, 0);
-static SENSOR_DEVICE_ATTR(curr2_min, 0444, show_vrm_gt_iout_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(curr2_max, 0444, show_vrm_gt_iout_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(power2_input, 0444, show_vrm_gt_pout, NULL, 0);
-static SENSOR_DEVICE_ATTR(power2_label, 0444, show_vrm_label_gt_pout, NULL, 0);
-static SENSOR_DEVICE_ATTR(power2_min, 0444, show_vrm_gt_pout_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(power2_max, 0444, show_vrm_gt_pout_max, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp21_input, 0444, show_vrm_gt_temp, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp21_label, 0444, show_vrm_label_gt_temp, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp21_min, 0444, show_vrm_gt_temp_min, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp21_max, 0444, show_vrm_gt_temp_max, NULL, 0);
 
 static umode_t nct6687_vrm_attr_is_visible(struct kobject* kobj,
     struct attribute* attr, int idx)
 {
-    if (!vrm_gt && (attr == &sensor_dev_attr_in22_input.dev_attr.attr || attr == &sensor_dev_attr_in22_label.dev_attr.attr || attr == &sensor_dev_attr_in22_min.dev_attr.attr || attr == &sensor_dev_attr_in22_max.dev_attr.attr || attr == &sensor_dev_attr_in23_input.dev_attr.attr || attr == &sensor_dev_attr_in23_label.dev_attr.attr || attr == &sensor_dev_attr_in23_min.dev_attr.attr || attr == &sensor_dev_attr_in23_max.dev_attr.attr || attr == &sensor_dev_attr_curr2_input.dev_attr.attr || attr == &sensor_dev_attr_curr2_label.dev_attr.attr || attr == &sensor_dev_attr_curr2_min.dev_attr.attr || attr == &sensor_dev_attr_curr2_max.dev_attr.attr || attr == &sensor_dev_attr_power2_input.dev_attr.attr || attr == &sensor_dev_attr_power2_label.dev_attr.attr || attr == &sensor_dev_attr_power2_min.dev_attr.attr || attr == &sensor_dev_attr_power2_max.dev_attr.attr || attr == &sensor_dev_attr_temp21_input.dev_attr.attr || attr == &sensor_dev_attr_temp21_label.dev_attr.attr || attr == &sensor_dev_attr_temp21_min.dev_attr.attr || attr == &sensor_dev_attr_temp21_max.dev_attr.attr))
+    struct sensor_device_attribute_2* sattr =
+        container_of(attr, struct sensor_device_attribute_2, dev_attr.attr);
+
+    (void)kobj;
+    (void)idx;
+    if (sattr->nr >= ARRAY_SIZE(nct_vrm_chans))
+        return 0444;
+    if ((nct_vrm_chans[sattr->nr].flags & NCT_VRM_F_GT) && !vrm_gt)
         return 0;
     return 0444;
 }
 
 static struct attribute* nct6687_vrm_attrs[] = {
-    &dev_attr_vrm_cpu.attr,
+    &sensor_dev_attr_vrm_cpu.dev_attr.attr,
     &sensor_dev_attr_in20_input.dev_attr.attr,
     &sensor_dev_attr_in20_label.dev_attr.attr,
     &sensor_dev_attr_in20_min.dev_attr.attr,
