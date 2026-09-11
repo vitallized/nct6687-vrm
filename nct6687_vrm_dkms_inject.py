@@ -475,15 +475,20 @@ def verify_compile(src: Path) -> Path:
     return kos[0]
 
 
+def kernels_for_rebuild(installed: list[str], current: str) -> list[str]:
+    """Running kernel first so a stale extra kernel cannot block the live one."""
+    rest = [k for k in installed if k != current]
+    return [current] + rest
+
+
 def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
     pkg_dir = src.parent
     pname, pver = parse_dkms(pkg_dir)
-    kvers = installed_kernels(pname, pver)
+    kvers = kernels_for_rebuild(installed_kernels(pname, pver), os.uname().release)
     current = os.uname().release
-    if current not in kvers:
-        kvers.append(current)
     print(f"Rebuilding {pname}/{pver} for kernels: {', '.join(kvers)}")
     built = 0
+    failed: list[str] = []
     for kver in kvers:
         headers = Path(f"/lib/modules/{kver}/build")
         if not headers.is_dir():
@@ -496,16 +501,31 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
             continue
         # install --force alone reuses stale builds; source was patched in-place
         print(f"--- dkms build -k {kver} --force ---")
-        subprocess.check_call(
-            ["dkms", "build", "-m", pname, "-v", pver, "-k", kver, "--force"]
-        )
-        print(f"--- dkms install -k {kver} --force ---")
-        subprocess.check_call(
-            ["dkms", "install", "-m", pname, "-v", pver, "-k", kver, "--force"]
-        )
+        try:
+            subprocess.check_call(
+                ["dkms", "build", "-m", pname, "-v", pver, "-k", kver, "--force"]
+            )
+            print(f"--- dkms install -k {kver} --force ---")
+            subprocess.check_call(
+                ["dkms", "install", "-m", pname, "-v", pver, "-k", kver, "--force"]
+            )
+        except subprocess.CalledProcessError as e:
+            if kver == current:
+                raise SystemExit(
+                    f"DKMS failed for running kernel {kver} (rc={e.returncode}). "
+                    "See /var/lib/dkms/{pname}/{pver}/build/make.log"
+                ) from e
+            print(
+                f"WARNING: DKMS failed for {kver} (rc={e.returncode}); "
+                "continuing with other kernels"
+            )
+            failed.append(kver)
+            continue
         built += 1
     if built == 0:
         raise SystemExit("DKMS rebuild skipped every kernel (no headers?)")
+    if failed:
+        print("WARNING: DKMS failed for extra kernels:", ", ".join(failed))
     if not reload:
         print("Skipped modprobe reload (--no-reload).")
         return
@@ -641,13 +661,8 @@ def check() -> int:
 
 def reinject(src: Path, reload: bool, load_vrm: bool) -> None:
     """Pacman-hook path: patch wiped stock sources, force-rebuild DKMS."""
-    if MARKER not in src.read_text():
-        print("Re-injecting VRM patch into", src)
-        inject(src)
-    else:
-        print("VRM patch already present in", src)
-        install_inc(src.parent)
-        patch_makefile(src.parent)
+    print("Re-injecting VRM patch into", src)
+    inject(src)
     rebuild(src, reload=reload, load_vrm=load_vrm)
 
 
@@ -732,12 +747,8 @@ def main() -> int:
         if MARKER not in src.read_text():
             print("Step 1/3: verify-compile...")
             verify_compile(src)
-            print("Step 2/3: inject...")
-            inject(src)
-        else:
-            print("Already injected; refreshing include + rebuilding...")
-            install_inc(src.parent)
-            patch_makefile(src.parent)
+        print("Step 2/3: inject (re-splice hooks from .pre-vrm if already patched)...")
+        inject(src)
         print("Step 3/3: dkms install...")
         rebuild(src, reload=not args.no_reload, load_vrm=load_vrm)
         return 0
