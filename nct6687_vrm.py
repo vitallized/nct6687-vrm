@@ -26,6 +26,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Protocol
 
 DEFAULT_BASE = 0xA20
 SMB_EN, SMB_START, SMB_CLEAR = 0x80, 0x40, 0x08
@@ -48,7 +49,22 @@ def discover_base() -> int:
     return DEFAULT_BASE
 
 
+class ByteIO(Protocol):
+    """inb/outb at the eSIO window (base+4 page, +5 index, +6 data)."""
+
+    base: int
+    cmd: int
+    idx: int
+    dat: int
+
+    def outb(self, port: int, val: int) -> None: ...
+
+    def inb(self, port: int) -> int: ...
+
+
 class Ports:
+    """Production ByteIO adapter: /dev/port. Tests pass a recording fake instead."""
+
     def __init__(self, base: int) -> None:
         self.base = base
         self.cmd = base + 4
@@ -73,7 +89,7 @@ class Ports:
         return b[0]
 
 
-def idle(p: Ports, spins: int = 5) -> bool:
+def idle(p: ByteIO, spins: int = 5) -> bool:
     """Force eSIO PAGE to 0xFF. Stock nct6687.ko leaves PAGE != 0xFF."""
     if p.inb(p.cmd) == 0xFF:
         return True
@@ -85,7 +101,7 @@ def idle(p: Ports, spins: int = 5) -> bool:
     return p.inb(p.cmd) == 0xFF
 
 
-def esio_write(p: Ports, index: int, value: int) -> None:
+def esio_write(p: ByteIO, index: int, value: int) -> None:
     if not idle(p):
         raise RuntimeError("eSIO idle failed (PAGE never 0xFF)")
     p.outb(p.cmd, 0x04)
@@ -94,7 +110,7 @@ def esio_write(p: Ports, index: int, value: int) -> None:
     p.outb(p.cmd, 0xFF)
 
 
-def esio_read(p: Ports, page: int, index: int) -> int:
+def esio_read(p: ByteIO, page: int, index: int) -> int:
     if not idle(p):
         raise RuntimeError("eSIO idle failed (PAGE never 0xFF)")
     p.outb(p.cmd, page & 0xFF)
@@ -104,7 +120,7 @@ def esio_read(p: Ports, page: int, index: int) -> int:
     return val
 
 
-def prep_clear(p: Ports) -> None:
+def prep_clear(p: ByteIO) -> None:
     esio_write(p, 0x03, 0xFF)
     esio_write(p, 0x04, 0xFF)
     ctrl = esio_read(p, 4, 0x60)
@@ -112,7 +128,7 @@ def prep_clear(p: Ports) -> None:
     esio_write(p, 0x60, ctrl & ~(SMB_START | SMB_CLEAR))
 
 
-def wait_start_clear(p: Ports, ms: int = 100) -> bool:
+def wait_start_clear(p: ByteIO, ms: int = 100) -> bool:
     for _ in range(ms):
         if (esio_read(p, 4, 0x60) & SMB_START) == 0:
             return True
@@ -120,20 +136,20 @@ def wait_start_clear(p: Ports, ms: int = 100) -> bool:
     return False
 
 
-def set_port(p: Ports, port: int) -> int:
+def set_port(p: ByteIO, port: int) -> int:
     """Set SMBus port mux; return previous cfg (reg 0x61)."""
     cfg = esio_read(p, 4, 0x61)
     esio_write(p, 0x61, (cfg & ~0x03) | (port & 0x03))
     return cfg
 
 
-def set_baud_100k(p: Ports) -> int:
+def set_baud_100k(p: ByteIO) -> int:
     prev = esio_read(p, 4, 0x62)
     esio_write(p, 0x62, 0x03)
     return prev
 
 
-def bus_recover(p: Ports) -> None:
+def bus_recover(p: ByteIO) -> None:
     try:
         prep_clear(p)
         esio_write(p, 0x60, 0x00)
@@ -141,7 +157,7 @@ def bus_recover(p: Ports) -> None:
         pass
 
 
-def smbus_write_byte(p: Ports, addr8: int, cmd: int, value: int) -> int:
+def smbus_write_byte(p: ByteIO, addr8: int, cmd: int, value: int) -> int:
     """Return status byte (0=ok). -2 = START timeout."""
     prep_clear(p)
     esio_write(p, 0x63, PROTO_WRITE_BYTE)
@@ -156,7 +172,7 @@ def smbus_write_byte(p: Ports, addr8: int, cmd: int, value: int) -> int:
     return esio_read(p, 4, 0x03)
 
 
-def smbus_read(p: Ports, addr8: int, cmd: int, word: bool) -> tuple[int, bytes]:
+def smbus_read(p: ByteIO, addr8: int, cmd: int, word: bool) -> tuple[int, bytes]:
     prep_clear(p)
     esio_write(p, 0x63, PROTO_WORD if word else PROTO_BYTE)
     esio_write(p, 0x65, addr8 & 0xFF)
@@ -234,7 +250,7 @@ PAGE_NAMES = {0: "CPU", 1: "GT"}
 
 
 def read_vrm(
-    p: Ports,
+    p: ByteIO,
     addr: int = DEFAULT_ADDR,
     port: int = DEFAULT_PORT,
     page: int = 0,
