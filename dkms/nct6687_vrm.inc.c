@@ -227,6 +227,13 @@ static void nct_vrm_invalidate_smbus(void)
     vrm_vout_mode_valid[1] = false;
 }
 
+/*
+ * Production PAGE sample — source of truth for userspace read_vrm:
+ *   PAGE write+readback (cache miss), VOUT_MODE 0x20 (cached),
+ *   then VOUT 0x8B, POUT 0x96, VIN 0x88, TEMP 0x8D.
+ *   IOUT 0x8C only when decoded VOUT <= 200 mV; otherwise IOUT = P/V.
+ *   CAP 0x19 / STATUS 0x78 are not on this path (debug-only in userspace).
+ */
 static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
     long* vout_mv, long* vin_mv, long* iout_ma,
     long* pout_uw, long* temp_mc)

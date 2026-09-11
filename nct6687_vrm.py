@@ -26,6 +26,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Protocol
 
 DEFAULT_BASE = 0xA20
 SMB_EN, SMB_START, SMB_CLEAR = 0x80, 0x40, 0x08
@@ -212,8 +213,6 @@ class VrmSample:
     addr: int
     page: int
     sts_page_wr: int
-    capability: int
-    status: int
     vout_mode: int
     vout_raw: int
     iout_raw: int
@@ -228,108 +227,251 @@ class VrmSample:
     vout_method: str
     iout_method: str
     base: int
+    # CAP 0x19 / STATUS 0x78 are debug-only (CLI --raw), not the kernel sample.
+    capability: int | None = None
+    status: int | None = None
 
 
 PAGE_NAMES = {0: "CPU", 1: "GT"}
 
 
+class ByteXfer(Protocol):
+    """PMBus + eSIO byte transfers for one PAGE sample.
+
+    Production: PortsXfer (/dev/port). Tests: a fake that records cmds.
+    """
+
+    def write_byte(self, addr: int, cmd: int, value: int) -> int:
+        """Write one PMBus byte. Return status (0=ok, -2=START timeout)."""
+        ...
+
+    def read_byte(self, addr: int, cmd: int) -> tuple[int, int]:
+        """Return (status, value)."""
+        ...
+
+    def read_word(self, addr: int, cmd: int) -> tuple[int, int]:
+        """Return (status, value). Status -3 = short read."""
+        ...
+
+    def esio_read(self, page: int, index: int) -> int: ...
+
+    def esio_write(self, index: int, value: int) -> None: ...
+
+    def recover(self) -> None:
+        """Kernel nct_vrm_bus_recover: prep_clear + ctrl 0x60=0."""
+        ...
+
+
+class PortsXfer:
+    """Production ByteXfer adapter: existing Ports via /dev/port."""
+
+    def __init__(self, ports: Ports) -> None:
+        self.ports = ports
+
+    def write_byte(self, addr: int, cmd: int, value: int) -> int:
+        return smbus_write_byte(self.ports, addr, cmd, value)
+
+    def read_byte(self, addr: int, cmd: int) -> tuple[int, int]:
+        sts, data = smbus_read(self.ports, addr, cmd, False)
+        return sts, (data[0] if data else 0)
+
+    def read_word(self, addr: int, cmd: int) -> tuple[int, int]:
+        sts, data = smbus_read(self.ports, addr, cmd, True)
+        if sts != 0:
+            return sts, 0
+        if len(data) < 2:
+            return -3, 0
+        return 0, data[0] | (data[1] << 8)
+
+    def esio_read(self, page: int, index: int) -> int:
+        return esio_read(self.ports, page, index)
+
+    def esio_write(self, index: int, value: int) -> None:
+        esio_write(self.ports, index, value)
+
+    def recover(self) -> None:
+        bus_recover(self.ports)
+
+
+class _SmbusCache:
+    """PAGE + VOUT_MODE cache. Same role as kernel vrm_smbus_page / vrm_vout_mode_*."""
+
+    def __init__(self) -> None:
+        self.page = -1
+        self.vout_mode: list[int | None] = [None, None]
+
+    def invalidate(self) -> None:
+        self.page = -1
+        self.vout_mode = [None, None]
+
+
+def _xfer_of(p: Ports | None, xfer: ByteXfer | None) -> ByteXfer:
+    if xfer is not None:
+        return xfer
+    if p is None:
+        raise TypeError("read_vrm requires Ports or xfer=")
+    existing = getattr(p, "_byte_xfer", None)
+    if existing is None:
+        existing = PortsXfer(p)
+        p._byte_xfer = existing
+    return existing
+
+
+def _cache_of(xfer: ByteXfer) -> _SmbusCache:
+    cache = getattr(xfer, "_smbus_cache", None)
+    if cache is None:
+        cache = _SmbusCache()
+        xfer._smbus_cache = cache  # type: ignore[attr-defined]
+    return cache
+
+
+def _xfer_fail(sts: int, cmd: int) -> None:
+    if sts == -2:
+        raise RuntimeError(f"START timeout on cmd {cmd:#04x}")
+    if sts == -3:
+        raise RuntimeError(f"cmd {cmd:#04x} short read")
+    if sts != 0:
+        raise RuntimeError(f"cmd {cmd:#04x} status={sts:#04x}")
+
+
+def _sample_page(
+    xfer: ByteXfer,
+    cache: _SmbusCache,
+    addr: int,
+    page: int,
+    vout_exp: int,
+    debug: bool,
+    base: int,
+) -> VrmSample:
+    """Match nct_vrm_sample_page. CAP/STATUS only when debug=True (CLI --raw)."""
+    if page > 1:
+        raise ValueError(f"PAGE {page} out of range (0=CPU, 1=GT)")
+
+    def rb(cmd: int) -> int:
+        sts, value = xfer.read_byte(addr, cmd)
+        _xfer_fail(sts, cmd)
+        return value
+
+    def rw(cmd: int) -> int:
+        sts, value = xfer.read_word(addr, cmd)
+        _xfer_fail(sts, cmd)
+        return value
+
+    sts_wr = 0
+    if cache.page != page:
+        sts_wr = xfer.write_byte(addr, 0x00, page)
+        if sts_wr == -2:
+            raise RuntimeError("SMBus START timeout on PAGE write — power-cycle recommended")
+        if sts_wr != 0:
+            raise RuntimeError(f"PAGE write NACK/status={sts_wr:#04x}")
+        page_r = rb(0x00)
+        if page_r != page:
+            raise RuntimeError(f"PAGE readback mismatch: wrote {page}, got {page_r}")
+        cache.page = page
+    else:
+        page_r = page
+
+    cached_mode = cache.vout_mode[page]
+    if cached_mode is None:
+        vout_mode = rb(0x20)
+        cache.vout_mode[page] = vout_mode
+    else:
+        vout_mode = cached_mode
+
+    # VOUT, POUT, VIN, TEMP — skip IOUT unless P/V is unusable (kernel order).
+    vout = rw(0x8B)
+    pout = rw(0x96)
+    vin = rw(0x88)
+    temp = rw(0x8D)
+
+    vout_v, vout_method = decode_vout(vout, vout_mode, vout_exp)
+    pout_w = linear11(pout)
+    temp_c = linear11(temp)
+    iout = 0
+    if vout_v > 0.2:
+        iout_a = pout_w / vout_v
+        iout_method = "P/V"
+    else:
+        iout = rw(0x8C)
+        iout_a = linear16(iout, -3)
+        iout_method = "linear16-N=-3"
+    # Renesas DMPVR2 Direct VIN: m=1,b=0,R=2 → 10 mV/LSB
+    vin_v = vin * 0.01
+
+    cap = status = None
+    if debug:
+        cap = rb(0x19)
+        status = rb(0x78)
+
+    return VrmSample(
+        addr=addr,
+        page=page_r,
+        sts_page_wr=sts_wr,
+        vout_mode=vout_mode,
+        vout_raw=vout,
+        iout_raw=iout,
+        pout_raw=pout,
+        vin_raw=vin,
+        temp_raw=temp,
+        vout_v=vout_v,
+        iout_a=iout_a,
+        pout_w=pout_w,
+        vin_v=vin_v,
+        temp_c=temp_c,
+        vout_method=vout_method,
+        iout_method=iout_method,
+        base=base,
+        capability=cap,
+        status=status,
+    )
+
+
 def read_vrm(
-    p: Ports,
+    p: Ports | None = None,
     addr: int = DEFAULT_ADDR,
     port: int = DEFAULT_PORT,
     page: int = 0,
     vout_exp: int = DEFAULT_VOUT_EXP,
+    *,
+    xfer: ByteXfer | None = None,
+    debug: bool = False,
 ) -> VrmSample:
-    cfg61 = set_port(p, port)
-    cfg62 = set_baud_100k(p)
-    esio_write(p, 0x60, SMB_EN)
+    """One production PAGE sample (nct6687_update_vrm + nct_vrm_sample_page).
 
+    PAGE + VOUT_MODE are cached on the xfer object, matching the kernel's
+    file-scope statics. Failures invalidate that cache and call xfer.recover().
+    CAP 0x19 / STATUS 0x78 are fetched only when debug=True (CLI --raw).
+    """
+    xfer = _xfer_of(p, xfer)
+    cache = _cache_of(xfer)
+    base = p.base if p is not None else 0
+    if page > 1:
+        raise ValueError(f"PAGE {page} out of range (0=CPU, 1=GT)")
+
+    saved = False
+    cfg61 = cfg62 = 0
     try:
-        sts_wr = smbus_write_byte(p, addr, 0x00, page)
-        if sts_wr == -2:
-            bus_recover(p)
-            raise RuntimeError("SMBus START timeout on PAGE write — power-cycle recommended")
-        if sts_wr != 0:
-            bus_recover(p)
-            raise RuntimeError(f"PAGE write NACK/status={sts_wr:#04x}")
-
-        def rb(cmd: int) -> int:
-            sts, data = smbus_read(p, addr, cmd, False)
-            if sts == -2:
-                bus_recover(p)
-                raise RuntimeError(f"START timeout on cmd {cmd:#04x}")
-            if sts != 0:
-                bus_recover(p)
-                raise RuntimeError(f"cmd {cmd:#04x} status={sts:#04x}")
-            return data[0] if data else 0
-
-        def rw(cmd: int) -> int:
-            sts, data = smbus_read(p, addr, cmd, True)
-            if sts == -2:
-                bus_recover(p)
-                raise RuntimeError(f"START timeout on cmd {cmd:#04x}")
-            if sts != 0:
-                bus_recover(p)
-                raise RuntimeError(f"cmd {cmd:#04x} status={sts:#04x}")
-            if len(data) < 2:
-                bus_recover(p)
-                raise RuntimeError(f"cmd {cmd:#04x} short read")
-            return data[0] | (data[1] << 8)
-
-        page_r = rb(0x00)
-        if page_r != page:
-            bus_recover(p)
-            raise RuntimeError(f"PAGE readback mismatch: wrote {page}, got {page_r}")
-
-        cap = rb(0x19)
-        vout_mode = rb(0x20)
-        status = rb(0x78)
-        vout = rw(0x8B)
-        iout = rw(0x8C)
-        pout = rw(0x96)
-        vin = rw(0x88)
-        temp = rw(0x8D)
-
-        vout_v, vout_method = decode_vout(vout, vout_mode, vout_exp)
-        pout_w = linear11(pout)
-        temp_c = linear11(temp)
-        if vout_v > 0.2:
-            iout_a = pout_w / vout_v
-            iout_method = "P/V"
-        else:
-            iout_a = linear16(iout, -3)
-            iout_method = "linear16-N=-3"
-        # Renesas DMPVR2 Direct VIN: m=1,b=0,R=2 → 10 mV/LSB
-        vin_v = vin * 0.01
-
-        return VrmSample(
-            addr=addr,
-            page=page_r,
-            sts_page_wr=sts_wr,
-            capability=cap,
-            status=status,
-            vout_mode=vout_mode,
-            vout_raw=vout,
-            iout_raw=iout,
-            pout_raw=pout,
-            vin_raw=vin,
-            temp_raw=temp,
-            vout_v=vout_v,
-            iout_a=iout_a,
-            pout_w=pout_w,
-            vin_v=vin_v,
-            temp_c=temp_c,
-            vout_method=vout_method,
-            iout_method=iout_method,
-            base=p.base,
-        )
+        cfg61 = xfer.esio_read(4, 0x61)
+        cfg62 = xfer.esio_read(4, 0x62)
+        saved = True
+        xfer.esio_write(0x61, (cfg61 & ~0x03) | (port & 0x03))
+        xfer.esio_write(0x62, 0x03)
+        xfer.esio_write(0x60, SMB_EN)
+        sample = _sample_page(xfer, cache, addr, page, vout_exp, debug, base)
+        xfer.esio_write(0x60, 0x00)
+        return sample
+    except (OSError, RuntimeError):
+        cache.invalidate()
+        xfer.recover()
+        raise
     finally:
-        try:
-            esio_write(p, 0x60, 0x00)
-            esio_write(p, 0x61, cfg61)
-            esio_write(p, 0x62, cfg62)
-        except (OSError, RuntimeError):
-            bus_recover(p)
+        if saved:
+            try:
+                xfer.esio_write(0x61, cfg61)
+                xfer.esio_write(0x62, cfg62)
+            except (OSError, RuntimeError):
+                cache.invalidate()
+                xfer.recover()
 
 
 def format_sensors(s: VrmSample, name: str | None = None) -> str:
@@ -342,11 +484,13 @@ def format_sensors(s: VrmSample, name: str | None = None) -> str:
         f"VRM {rail} Power:   {s.pout_w:8.3f} W  (RAW 0x{s.pout_raw:04x})",
         f"VRM {rail} VIN:     {s.vin_v:8.3f} V  (Direct 10mV; RAW 0x{s.vin_raw:04x})",
         f"VRM {rail} Temp:    {s.temp_c:8.1f} °C (RAW 0x{s.temp_raw:04x})",
-        f"CAPABILITY:    0x{s.capability:02x}",
-        f"STATUS_BYTE:   0x{s.status:02x}",
         f"VOUT_MODE:     0x{s.vout_mode:02x}",
         f"PAGE:          {s.page} ({rail})",
     ]
+    if s.capability is not None:
+        lines.append(f"CAPABILITY:    0x{s.capability:02x}")
+    if s.status is not None:
+        lines.append(f"STATUS_BYTE:   0x{s.status:02x}")
     return "\n".join(lines) + "\n"
 
 
@@ -373,7 +517,11 @@ def main() -> int:
         help="Fallback LINEAR16 exp if VOUT_MODE unknown (clamped -16..15)",
     )
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--raw", action="store_true")
+    ap.add_argument(
+        "--raw",
+        action="store_true",
+        help="Also fetch CAP 0x19 / STATUS 0x78 (debug-only; not on the kernel sample path)",
+    )
     ap.add_argument("--loop", type=float, nargs="?", const=1.0, default=None)
     ap.add_argument(
         "--force",
@@ -405,7 +553,9 @@ def main() -> int:
             samples = []
             for page in pages:
                 try:
-                    samples.append(read_vrm(p, args.addr, args.port, page, vout_exp))
+                    samples.append(
+                        read_vrm(p, args.addr, args.port, page, vout_exp, debug=args.raw)
+                    )
                 except (RuntimeError, OSError) as e:
                     had_page_error = True
                     if len(pages) == 1:
