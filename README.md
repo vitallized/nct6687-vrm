@@ -14,7 +14,7 @@ Load with `vrm=0` first. Check fans and board temps. Then enable VRM.
 
 CPU VRM voltage, current, power, and temperature on Linux, read through the NCT6687 eSIO SMBus. Same path HWiNFO uses on Windows.
 
-The DKMS patch is a small hook in `nct6687.c`. The VRM code lives in [`dkms/nct6687_vrm.inc.c`](dkms/nct6687_vrm.inc.c) and gets `#include`'d at build time. Upstream driver updates are more likely to break a few anchors than a giant inlined blob. That's the point.
+The DKMS splice is a small hook in `nct6687.c`. The VRM implementation is `#include`'d from [`dkms/nct6687_vrm.inc.c`](dkms/nct6687_vrm.inc.c); decode, the eSIO mailbox, and the `nct6687_data` members live in sibling headers. Upstream driver updates are more likely to break a few anchors than a giant inlined blob. That's the point.
 
 Proven on MSI MPG Z790 CARBON WIFI, MS-7D89, Renesas multiphase at PMBus `0xC0`.
 Needs [`nct6687d`](https://github.com/Fred78290/nct6687d) already providing fans and temps via `nct6687.ko`.
@@ -123,16 +123,14 @@ Status: `python3 ./nct6687_vrm_dkms_inject.py --check`
 sudo modprobe -r nct6687
 sudo modprobe nct6687 vrm=0
 
-# Restore stock DKMS sources (nct6687.c + Makefile) and rebuild
+# Restore stock nct6687.c and rebuild
 sudo python3 ./nct6687_vrm_dkms_inject.py --restore --rebuild
-# also removes nct6687_vrm.inc.c from the DKMS tree
+# also removes the VRM include and headers from the DKMS tree
 
 # Remove persist bits (if you installed the hook)
 sudo rm -f /etc/pacman.d/hooks/nct6687-vrm-reinject.hook \
            /etc/pacman.d/hooks/nct6687-vrm-preupgrade.hook \
-           /etc/modprobe.d/nct6687-vrm.conf \
-           /usr/local/sbin/nct6687-vrm-reinject \
-           /usr/local/sbin/nct6687-vrm-preupgrade
+           /etc/modprobe.d/nct6687-vrm.conf
 sudo rm -rf /usr/local/lib/nct6687-vrm
 ```
 
