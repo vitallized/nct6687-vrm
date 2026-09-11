@@ -380,10 +380,18 @@ def inject(src: Path) -> None:
     install_inc(src.parent)
     patch_makefile(src.parent)
     text = src.read_text()
-    if MARKER in text:
-        print("Already injected (hooks); refreshed", ", ".join(VRM_FILES))
-        return
     bak = Path(str(src) + ".pre-vrm")
+    if MARKER in text:
+        if not bak.is_file():
+            print(
+                "Already injected; refreshed",
+                ", ".join(VRM_FILES),
+                "(no .pre-vrm — struct fields not rewritten)",
+            )
+            return
+        src.write_text(inject_text(bak.read_text()))
+        print("Re-injected hooks from", bak)
+        return
     if not bak.exists():
         shutil.copy2(src, bak)
         print("Backup:", bak)
@@ -434,22 +442,27 @@ def verify_compile(src: Path) -> Path:
         (build_root / "Kbuild").write_text(MINIMAL_KBUILD)
         print("WARNING: no Kbuild in", pkg_dir, "— synthesized a minimal one for verify-compile")
     patch_makefile(build_root)
-    if MARKER in raw and f'#include "{INC_NAME}"' in raw:
-        (build_root / "nct6687.c").write_text(raw)
-        # Prefer the checkout include so --verify-compile tests local edits,
-        # not a stale copy sitting in /usr/src.
-        for name in VRM_FILES:
-            shutil.copy2(find_vrm_file(name), build_root / name)
-    elif MARKER in raw:
-        # Legacy single-file inject — rebuild from stock backup if present
-        bak = Path(str(src) + ".pre-vrm")
-        if not bak.is_file():
+    bak = Path(str(src) + ".pre-vrm")
+    if MARKER in raw:
+        # Live sources are already spliced. Re-apply current inject_text on the
+        # stock backup so STRUCT_FIELDS / hooks match this checkout.
+        if bak.is_file():
+            install_inc(build_root)
+            (build_root / "nct6687.c").write_text(inject_text(bak.read_text()))
+        elif f'#include "{INC_NAME}"' in raw:
+            (build_root / "nct6687.c").write_text(raw)
+            for name in VRM_FILES:
+                shutil.copy2(find_vrm_file(name), build_root / name)
+            print(
+                "WARNING: live nct6687.c is injected but",
+                bak.name,
+                "is missing — compile uses stale struct fields",
+            )
+        else:
             raise SystemExit(
                 "Live nct6687.c has an old-style VRM inject. "
                 f"Restore stock first ({bak.name}) or run --restore, then --verify-compile."
             )
-        install_inc(build_root)
-        (build_root / "nct6687.c").write_text(inject_text(bak.read_text()))
     else:
         install_inc(build_root)
         (build_root / "nct6687.c").write_text(inject_text(raw))
