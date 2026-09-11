@@ -256,7 +256,7 @@ class ByteXfer(Protocol):
 class PortsXfer:
     """Production ByteXfer adapter: existing Ports via /dev/port."""
 
-    def __init__(self, ports: Ports) -> None:
+    def __init__(self, ports: ByteIO) -> None:
         self.ports = ports
 
     def write_byte(self, addr: int, cmd: int, value: int) -> int:
@@ -296,7 +296,7 @@ class _SmbusCache:
         self.vout_mode = [None, None]
 
 
-def _xfer_of(p: Ports | None, xfer: ByteXfer | None) -> ByteXfer:
+def _xfer_of(p: ByteIO | None, xfer: ByteXfer | None) -> ByteXfer:
     if xfer is not None:
         return xfer
     if p is None:
