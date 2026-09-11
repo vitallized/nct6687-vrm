@@ -2,9 +2,11 @@
 """Inject eSIO PMBus VRM hwmon attrs into nct6687 DKMS sources, then rebuild.
 
 Bulk VRM logic lives in dkms/nct6687_vrm.inc.c (copied beside nct6687.c and
-#include'd), with raw→millisi math in nct6687_vrm_decode.h. This script only
-splices small hooks into nct6687.c so upstream driver churn breaks a few
-anchors — not a 500-line embedded blob.
+#include'd), with raw→millisi math in nct6687_vrm_decode.h, the eSIO
+mailbox in nct6687_vrm_mailbox.h, and nct6687_data members in
+nct6687_vrm_data.h. This script only splices small hooks into
+nct6687.c so upstream driver churn breaks a few anchors — not a 500-line
+embedded blob.
 
 Safety: --verify-compile; --install loads vrm=0; update_vrm outside update_lock;
 GT hidden unless vrm_gt=1; modprobe -r must succeed.
@@ -26,56 +28,14 @@ from pathlib import Path
 MARKER = "NCT6687_VRM_PMBUS_INJECT"
 INC_NAME = "nct6687_vrm.inc.c"
 DECODE_NAME = "nct6687_vrm_decode.h"
-VRM_FILES = (INC_NAME, DECODE_NAME)
+DATA_NAME = "nct6687_vrm_data.h"
+MAILBOX_NAME = "nct6687_vrm_mailbox.h"
+PATCH_NAME = "vrm-splice.patch"
+VRM_FILES = (INC_NAME, DECODE_NAME, DATA_NAME, MAILBOX_NAME)
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Splice payload only. The include reads these via struct nct6687_data
-# after inject_text inserts them; do not duplicate the list in C.
-STRUCT_FIELDS = """
-	/* VRM PMBus (eSIO): PAGE0=CPU, PAGE1=GT */
-	bool vrm_enabled;
-	bool vrm_valid;
-	bool vrm_gt_valid;
-	bool vrm_demand;
-	unsigned long vrm_last_updated;
-	unsigned long vrm_last_read;
-	unsigned long vrm_read_gap;
-	long vrm_vout; /* mV */
-	long vrm_vin;  /* mV */
-	long vrm_iout; /* mA */
-	long vrm_pout; /* uW */
-	long vrm_temp; /* mC */
-	long vrm_gt_vout;
-	long vrm_gt_vin;
-	long vrm_gt_iout;
-	long vrm_gt_pout;
-	long vrm_gt_temp;
-	int vrm_smbus_page;
-	u8 vrm_vout_mode_cache[2];
-	bool vrm_vout_mode_valid[2];
-	bool vrm_hist_init;
-	long vrm_vout_min;
-	long vrm_vout_max;
-	long vrm_vin_min;
-	long vrm_vin_max;
-	long vrm_iout_min;
-	long vrm_iout_max;
-	long vrm_pout_min;
-	long vrm_pout_max;
-	long vrm_temp_min;
-	long vrm_temp_max;
-	bool vrm_gt_hist_init;
-	long vrm_gt_vout_min;
-	long vrm_gt_vout_max;
-	long vrm_gt_vin_min;
-	long vrm_gt_vin_max;
-	long vrm_gt_iout_min;
-	long vrm_gt_iout_max;
-	long vrm_gt_pout_min;
-	long vrm_gt_pout_max;
-	long vrm_gt_temp_min;
-	long vrm_gt_temp_max;
-"""
+# Members live in DATA_NAME. Splice that include inside struct nct6687_data.
+VRM_DATA_INCLUDE = f'#include "{DATA_NAME}"\n'
 
 # The include defines nct6687_update_vrm and no longer calls
 # nct6687_update_device (nct_vrm_touch_and_update goes straight to
@@ -91,16 +51,7 @@ VRM_INCLUDE = f"""
 """
 
 PROBE_ENABLE = """
-	data->vrm_enabled = vrm;
-	data->vrm_last_updated = 0;
-	data->vrm_last_read = 0;
-	data->vrm_read_gap = 0;
-	data->vrm_demand = false;
-	data->vrm_smbus_page = -1;
-	data->vrm_vout_mode_valid[0] = false;
-	data->vrm_vout_mode_valid[1] = false;
-	data->vrm_hist_init = false;
-	data->vrm_gt_hist_init = false;
+	nct_vrm_data_reset(data, vrm);
 	if (data->vrm_enabled)
 		dev_info(dev, "VRM PMBus eSIO sensors enabled (addr=0x%02x vout_exp=%d gt=%d)\\n",
 			 vrm_addr & 0xff, vrm_vout_exp, vrm_gt ? 1 : 0);
@@ -108,13 +59,6 @@ PROBE_ENABLE = """
 		dev_info(dev, "VRM PMBus eSIO sensors built-in but disabled (modprobe nct6687 vrm=1)\\n");
 
 """
-
-# `build:` copies sources into ${kver}/. Upstream has shipped this with and
-# without Kbuild; we only require the VRM include to be on that cp line.
-_CP_TO_KVER = re.compile(
-    r"^(\t*cp(?: \$\{curpwd\}/[^\s]+)+) \$\{curpwd\}/\$\{kver\}\s*$",
-    re.M,
-)
 
 PACMAN_LOCAL = Path("/var/lib/pacman/local")
 INSTALLED_LIB = Path("/usr/local/lib/nct6687-vrm")
@@ -137,6 +81,48 @@ def find_vrm_file(name: str) -> Path:
 
 def find_inc() -> Path:
     return find_vrm_file(INC_NAME)
+
+
+def find_patch() -> Path:
+    candidates = [
+        REPO_ROOT / "patches" / PATCH_NAME,
+        INSTALLED_LIB / PATCH_NAME,
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    raise SystemExit(
+        f"Missing {PATCH_NAME} (tried: {', '.join(str(c) for c in candidates)})"
+    )
+
+
+def apply_splice_text(stock: str, patch: Path | None = None) -> str:
+    """Apply the committed -p1 splice. Rejects halt (same as DKMS PATCH[#])."""
+    patch_path = patch if patch is not None else find_patch()
+    if not patch_path.is_file():
+        raise SystemExit(f"Missing splice patch {patch_path}")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "nct6687.c").write_text(stock)
+        ran = subprocess.run(
+            [
+                "patch",
+                "-p1",
+                "--forward",
+                "--fuzz=0",
+                "--directory",
+                str(root),
+                "-i",
+                str(patch_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if ran.returncode != 0:
+            raise SystemExit(
+                f"splice patch rejected ({patch_path}): {ran.stderr or ran.stdout}"
+            )
+        return (root / "nct6687.c").read_text()
 
 
 def _pacman_owned_files(pkg_prefix: str = "nct6687d-dkms-git-") -> set[str]:
@@ -179,25 +165,6 @@ def find_src() -> Path:
         raise SystemExit("No /usr/src/nct6687d*/nct6687.c found")
     matches.sort(key=lambda p: Path(p).stat().st_mtime)
     return Path(matches[-1])
-
-
-def patched_makefile_text(text: str, extra_names: list[str]) -> tuple[str | None, bool]:
-    """Insert extra filenames into the stock `cp … ${kver}` line.
-
-    Returns (None, False) if that line is missing.
-    """
-    m = _CP_TO_KVER.search(text)
-    if not m:
-        return None, False
-    prefix = m.group(1)
-    new_prefix = prefix
-    for name in extra_names:
-        token = f"${{curpwd}}/{name}"
-        if token not in new_prefix:
-            new_prefix = f"{new_prefix} {token}"
-    if new_prefix == prefix:
-        return text, False
-    return text[: m.start(1)] + new_prefix + text[m.end(1) :], True
 
 
 def unowned_toplevel(pkg_dir: Path) -> list[Path]:
@@ -272,28 +239,61 @@ def install_inc(pkg_dir: Path) -> Path:
     return dst
 
 
-def patch_makefile(pkg_dir: Path) -> None:
-    """Ensure `make build` copies the VRM include into the per-kernel build dir."""
-    mf = pkg_dir / "Makefile"
-    if not mf.is_file():
-        return
-    extra = list(VRM_FILES)
-    if (pkg_dir / "Kbuild").is_file():
-        extra.insert(0, "Kbuild")
-    new_text, changed = patched_makefile_text(mf.read_text(), extra)
-    if new_text is None:
-        print(
-            "WARNING: Makefile cp line not found — verify-compile may fail; "
-            "DKMS in-tree build may still work if the include sits beside nct6687.c"
-        )
-        return
-    if not changed:
-        return
-    bak = Path(str(mf) + ".pre-vrm")
-    if not bak.exists():
-        shutil.copy2(mf, bak)
-    mf.write_text(new_text)
-    print("Patched", mf)
+def headers_for(kver: str) -> Path:
+    return Path(f"/lib/modules/{kver}/build")
+
+
+def kbuild_extra_argv(headers: Path) -> list[str]:
+    """Match nct6687d Makefile: LLVM=1 when the kernel was built with clang."""
+    cfg = headers / ".config"
+    try:
+        text = cfg.read_text()
+    except OSError:
+        return []
+    if "CONFIG_CC_IS_CLANG=y" in text:
+        return ["LLVM=1"]
+    return []
+
+
+def kbuild_modules_argv(headers: Path, tree: Path) -> list[str]:
+    """DKMS M= invoke, plus LLVM=1 when .config says clang."""
+    return [
+        "make",
+        "-C",
+        str(headers),
+        f"M={tree}",
+        *kbuild_extra_argv(headers),
+        "modules",
+    ]
+
+
+def stage_m_tree(
+    dest: Path,
+    stock_c: str,
+    *,
+    pkg_dir: Path,
+    synthesize_kbuild: bool = False,
+    patch: Path | None = None,
+) -> None:
+    """Write a DKMS M= tree: spliced nct6687.c, Kbuild, VRM files.
+
+    Does not rewrite Makefile. Do not synthesize Kbuild into a live DKMS dir
+    (that was the Kbuild trap); scratch verify-compile may.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_kbuild = dest / "Kbuild"
+    kbuild_src = pkg_dir / "Kbuild"
+    if kbuild_src.is_file():
+        if kbuild_src.resolve() != dest_kbuild.resolve():
+            shutil.copy2(kbuild_src, dest_kbuild)
+    elif synthesize_kbuild:
+        dest_kbuild.write_text(MINIMAL_KBUILD)
+        print("WARNING: no Kbuild in", pkg_dir, "— synthesized a minimal one")
+    for name in VRM_FILES:
+        out = dest / name
+        shutil.copy2(find_vrm_file(name), out)
+        print("Installed", out)
+    (dest / "nct6687.c").write_text(apply_splice_text(stock_c, patch))
 
 
 def _require_anchor(text: str, needle: str, name: str, hint: str = "") -> None:
@@ -322,7 +322,7 @@ def inject_text(text: str) -> str:
         "driver group registration changed again",
     )
     text = text.replace(extra_groups_old, extra_groups_new, 1)
-    text = text.replace(needle, STRUCT_FIELDS + "\n" + needle, 1)
+    text = text.replace(needle, VRM_DATA_INCLUDE + "\n" + needle, 1)
 
     upd_sig = "static struct nct6687_data *nct6687_update_device(struct device *dev)"
     _require_anchor(text, upd_sig, "nct6687_update_device signature")
@@ -377,25 +377,25 @@ def inject_text(text: str) -> str:
 
 
 def inject(src: Path) -> None:
-    install_inc(src.parent)
-    patch_makefile(src.parent)
+    pkg = src.parent
     text = src.read_text()
     bak = Path(str(src) + ".pre-vrm")
     if MARKER in text:
         if not bak.is_file():
+            install_inc(pkg)
             print(
                 "Already injected; refreshed",
                 ", ".join(VRM_FILES),
-                "(no .pre-vrm — struct fields not rewritten)",
+                "(no .pre-vrm — hooks not rewritten)",
             )
             return
-        src.write_text(inject_text(bak.read_text()))
+        stage_m_tree(pkg, bak.read_text(), pkg_dir=pkg)
         print("Re-injected hooks from", bak)
         return
     if not bak.exists():
         shutil.copy2(src, bak)
         print("Backup:", bak)
-    src.write_text(inject_text(text))
+    stage_m_tree(pkg, text, pkg_dir=pkg)
     print("Patched", src)
 
 
@@ -418,10 +418,10 @@ def restore(src: Path) -> None:
 
 def verify_compile(src: Path) -> Path:
     pkg_dir = src.parent
-    makefile = pkg_dir / "Makefile"
-    if not makefile.exists():
-        raise SystemExit(f"No Makefile in {pkg_dir}")
     kver = os.uname().release
+    headers = headers_for(kver)
+    if not headers.is_dir():
+        raise SystemExit(f"No kernel headers at {headers}")
     build_root = REPO_ROOT / ".vrm-verify-build"
     if build_root.exists():
         try:
@@ -430,26 +430,20 @@ def verify_compile(src: Path) -> Path:
             # Prior sudo verify-compile can leave a root-owned tree
             build_root = Path(tempfile.mkdtemp(prefix="nct6687-vrm-verify-"))
             print("WARNING: using", build_root, "(could not clear .vrm-verify-build)")
-    build_root.mkdir(parents=True, exist_ok=True)
     raw = src.read_text()
-    # Prefer stock Makefile backup so we don't copy an already-patched live Makefile
-    mf_src = Path(str(makefile) + ".pre-vrm")
-    shutil.copy2(mf_src if mf_src.is_file() else makefile, build_root / "Makefile")
-    kbuild_src = pkg_dir / "Kbuild"
-    if kbuild_src.is_file():
-        shutil.copy2(kbuild_src, build_root / "Kbuild")
-    else:
-        (build_root / "Kbuild").write_text(MINIMAL_KBUILD)
-        print("WARNING: no Kbuild in", pkg_dir, "— synthesized a minimal one for verify-compile")
-    patch_makefile(build_root)
     bak = Path(str(src) + ".pre-vrm")
     if MARKER in raw:
-        # Live sources are already spliced. Re-apply current inject_text on the
-        # stock backup so STRUCT_FIELDS / hooks match this checkout.
         if bak.is_file():
-            install_inc(build_root)
-            (build_root / "nct6687.c").write_text(inject_text(bak.read_text()))
+            stage_m_tree(
+                build_root, bak.read_text(), pkg_dir=pkg_dir, synthesize_kbuild=True
+            )
         elif f'#include "{INC_NAME}"' in raw:
+            build_root.mkdir(parents=True, exist_ok=True)
+            kbuild_src = pkg_dir / "Kbuild"
+            if kbuild_src.is_file():
+                shutil.copy2(kbuild_src, build_root / "Kbuild")
+            else:
+                (build_root / "Kbuild").write_text(MINIMAL_KBUILD)
             (build_root / "nct6687.c").write_text(raw)
             for name in VRM_FILES:
                 shutil.copy2(find_vrm_file(name), build_root / name)
@@ -464,10 +458,9 @@ def verify_compile(src: Path) -> Path:
                 f"Restore stock first ({bak.name}) or run --restore, then --verify-compile."
             )
     else:
-        install_inc(build_root)
-        (build_root / "nct6687.c").write_text(inject_text(raw))
-    print(f"Verify-compile in {build_root} for {kver}")
-    subprocess.check_call(["make", f"TARGET={kver}", "build"], cwd=build_root)
+        stage_m_tree(build_root, raw, pkg_dir=pkg_dir, synthesize_kbuild=True)
+    print(f"Verify-compile M={build_root}")
+    subprocess.check_call(kbuild_modules_argv(headers, build_root))
     kos = list(build_root.rglob("nct6687.ko"))
     if not kos:
         raise SystemExit("nct6687.ko not found")
@@ -646,6 +639,28 @@ def check() -> int:
             else:
                 stale = True
                 print(f"Installed {name}: missing")
+        persist_py = INSTALLED_LIB / "nct6687_vrm_persist.py"
+        persist_src = REPO_ROOT / "nct6687_vrm_persist.py"
+        if persist_py.is_file() and persist_src.is_file():
+            p_stale = persist_py.read_bytes() != persist_src.read_bytes()
+            stale = stale or p_stale
+            print("Installed persist:", "STALE" if p_stale else "ok")
+        else:
+            stale = True
+            print("Installed persist: missing")
+        try:
+            patch_src = find_patch()
+            patch_inst = INSTALLED_LIB / PATCH_NAME
+            if patch_inst.is_file():
+                patch_stale = patch_inst.read_bytes() != patch_src.read_bytes()
+                stale = stale or patch_stale
+                print("Installed splice patch:", "STALE" if patch_stale else "ok")
+            else:
+                stale = True
+                print("Installed splice patch: missing")
+        except SystemExit:
+            stale = True
+            print("Installed splice patch: missing")
     else:
         print("Installed hook copy: missing (run pacman-hook/install.sh)")
         stale = True

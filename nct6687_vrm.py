@@ -32,7 +32,10 @@ from nct6687_vrm_decode import (
     decode_iout_fallback_ma,
     decode_vin_mv,
     decode_vout,
+    decode_vout_mv,
+    iout_from_pv_ma,
     linear11,
+    linear11_milli,
 )
 
 DEFAULT_BASE = 0xA20
@@ -375,12 +378,14 @@ def _sample_page(
     vin = rw(0x88)
     temp = rw(0x8D)
 
+    v_mv = decode_vout_mv(vout, vout_mode, vout_exp)
     vout_v, vout_method = decode_vout(vout, vout_mode, vout_exp)
+    p_mw = linear11_milli(pout)
     pout_w = linear11(pout)
     temp_c = linear11(temp)
     iout = 0
-    if vout_v > 0.2:
-        iout_a = pout_w / vout_v
+    if v_mv > 200:
+        iout_a = iout_from_pv_ma(p_mw, v_mv) / 1000.0
         iout_method = "P/V"
     else:
         iout = rw(0x8C)
@@ -428,8 +433,8 @@ def read_vrm(
 ) -> VrmSample:
     """One production PAGE sample (nct6687_update_vrm + nct_vrm_sample_page).
 
-    PAGE + VOUT_MODE are cached on the xfer object, matching the kernel's
-    file-scope statics. Failures invalidate that cache and call xfer.recover().
+    PAGE + VOUT_MODE are cached on the xfer object, matching nct6687_data.
+    Failures invalidate that cache and call xfer.recover().
     CAP 0x19 / STATUS 0x78 are fetched only when debug=True (CLI --raw).
     """
     xfer = _xfer_of(p, xfer)

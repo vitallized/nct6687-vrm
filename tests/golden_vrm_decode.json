@@ -91,6 +91,41 @@
       "args": [32769],
       "expect": 0,
       "note": "LINEAR11 0x8001 N=-16, Y=1: right-shift uses clamp(16)=15, so 1000>>15 = 0"
+    },
+    {
+      "name": "iout_from_pv_sample_fixture",
+      "fn": "iout_from_pv_ma",
+      "args": [50000, 1234],
+      "expect": 40518,
+      "note": "50 W / 1.234 V as millisi: (50000*1000)/1234 = 40518 mA, not float 50/1.234"
+    },
+    {
+      "name": "iout_from_pv_exact",
+      "fn": "iout_from_pv_ma",
+      "args": [50000, 1000],
+      "expect": 50000,
+      "note": "exact 50 W / 1.000 V → 50000 mA"
+    },
+    {
+      "name": "iout_from_pv_truncation",
+      "fn": "iout_from_pv_ma",
+      "args": [1000, 3],
+      "expect": 333333,
+      "note": "(1000*1000)/3 toward zero = 333333"
+    },
+    {
+      "name": "iout_from_pv_just_above_200",
+      "fn": "iout_from_pv_ma",
+      "args": [10000, 201],
+      "expect": 49751,
+      "note": "helper has no 200 mV policy; 10000 mW / 201 mV"
+    },
+    {
+      "name": "iout_from_pv_neg_pout",
+      "fn": "iout_from_pv_ma",
+      "args": [-1000, 3],
+      "expect": -333333,
+      "note": "toward-zero on negative POUT, not Python floor-div"
     }
   ]
 }

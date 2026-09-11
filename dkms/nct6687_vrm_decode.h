@@ -80,4 +80,14 @@ static long nct_vrm_decode_iout_fallback_ma(u16 iout)
 	return ((long)iout * 1000L) >> 3;
 }
 
+/* IOUT mA from already-decoded POUT mW and VOUT mV. Toward-zero like C `/`.
+ * Caller owns the 200 mV / READ_IOUT policy. v_mv == 0 → 0.
+ */
+static long nct_vrm_iout_from_pv_ma(long p_mw, long v_mv)
+{
+	if (!v_mv)
+		return 0;
+	return (p_mw * 1000L) / v_mv;
+}
+
 #endif

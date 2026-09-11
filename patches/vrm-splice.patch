@@ -1,0 +1,70 @@
+--- a/nct6687.c
++++ b/nct6687.c
+@@ -192,7 +192,7 @@
+  */
+ 
+ #define IOREGION_OFFSET 0 /* Use EC port 1 */
+-#define IOREGION_LENGTH 4
++#define IOREGION_LENGTH 8
+ 
+ /* Common and NCT6687 specific data */
+ 
+@@ -642,7 +642,9 @@
+ 	enum kinds kind;
+ 
+ 	struct device *dev;
+-	const struct attribute_group *extra_groups[2];
++	const struct attribute_group *extra_groups[3];
++
++#include "nct6687_vrm_data.h"
+ 
+ 	struct mutex update_lock;	/* used to protect sensor updates */
+ 	struct mutex EC_io_lock;	/* used to protect EC io */
+@@ -911,6 +913,12 @@
+ 	}
+ }
+ 
++
++static void nct6687_update_vrm(struct nct6687_data *data);
++
++/* NCT6687_VRM_PMBUS_INJECT — see nct6687_vrm.inc.c */
++#include "nct6687_vrm.inc.c"
++
+ static struct nct6687_data *nct6687_update_device(struct device *dev)
+ {
+ 	struct nct6687_data *data = dev_get_drvdata(dev);
+@@ -932,6 +940,9 @@
+ 	}
+ 
+ 	mutex_unlock(&data->update_lock);
++
++	/* VRM: EC_io_lock only — do not hold update_lock across SMBus */
++	nct6687_update_vrm(data);
+ 
+ 	return data;
+ }
+@@ -1749,8 +1760,22 @@
+ 	nct6687_setup_temperatures(data);
+ 	nct6687_setup_voltages(data);
+ 
+-	if (nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)
+-		data->extra_groups[0] = &nct6687_fan_watchdog_group;
++	nct_vrm_data_reset(data, vrm);
++	if (data->vrm_enabled)
++		dev_info(dev, "VRM PMBus eSIO sensors enabled (addr=0x%02x vout_exp=%d gt=%d)\n",
++			 vrm_addr & 0xff, vrm_vout_exp, vrm_gt ? 1 : 0);
++	else
++		dev_info(dev, "VRM PMBus eSIO sensors built-in but disabled (modprobe nct6687 vrm=1)\n");
++
++
++	{
++		int eg = 0;
++
++		if (nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)
++			data->extra_groups[eg++] = &nct6687_fan_watchdog_group;
++		if (data->vrm_enabled)
++			data->extra_groups[eg++] = &nct6687_vrm_group;
++	}
+ 
+ 	scnprintf(build, sizeof(build), "%02d/%02d/%02d", nct6687_read(data, NCT6687_REG_BUILD_MONTH), nct6687_read(data, NCT6687_REG_BUILD_DAY), nct6687_read(data, NCT6687_REG_BUILD_YEAR));
+ 

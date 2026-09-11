@@ -97,12 +97,13 @@ Audit before running. That script installs:
 | Path | Source in this repo |
 |------|---------------------|
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm_dkms_inject.py` | `nct6687_vrm_dkms_inject.py` |
+| `/usr/local/lib/nct6687-vrm/nct6687_vrm_persist.py` | `nct6687_vrm_persist.py` (pacman pre/post) |
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm.inc.c` | `dkms/nct6687_vrm.inc.c` (VRM implementation `#include`'d into the driver) |
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm_decode.h` | `dkms/nct6687_vrm_decode.h` (raw→millisi math, also used by host tests) |
-| `/usr/local/lib/nct6687-vrm/refresh-from-source.sh` | `pacman-hook/refresh-from-source.sh` |
+| `/usr/local/lib/nct6687-vrm/nct6687_vrm_data.h` | `dkms/nct6687_vrm_data.h` (VRM members of `nct6687_data`) |
+| `/usr/local/lib/nct6687-vrm/nct6687_vrm_mailbox.h` | `dkms/nct6687_vrm_mailbox.h` (eSIO mailbox; host-tested) |
+| `/usr/local/lib/nct6687-vrm/vrm-splice.patch` | `patches/vrm-splice.patch` (overlay `-p1`) |
 | `/usr/local/lib/nct6687-vrm/source.env` | written at install (`SOURCE_REPO=` this checkout) |
-| `/usr/local/sbin/nct6687-vrm-preupgrade` | `pacman-hook/nct6687-vrm-preupgrade` |
-| `/usr/local/sbin/nct6687-vrm-reinject` | `pacman-hook/nct6687-vrm-reinject` |
 | `/etc/pacman.d/hooks/nct6687-vrm-preupgrade.hook` | `pacman-hook/nct6687-vrm-preupgrade.hook` |
 | `/etc/pacman.d/hooks/nct6687-vrm-reinject.hook` | `pacman-hook/nct6687-vrm-reinject.hook` |
 | `/etc/modprobe.d/nct6687-vrm.conf` | `pacman-hook/nct6687-vrm.conf` (`options nct6687 vrm=1`) |
@@ -111,7 +112,7 @@ The pre-upgrade hook deletes unowned files in `/usr/src/nct6687d*`. That means t
 
 The post-upgrade hook rebuilds on disk. It does not unload the running module mid-transaction. Reboot or reload later to pick up the new build.
 
-If this checkout still exists at `SOURCE_REPO`, both helpers copy a newer inject/include into `/usr/local` first, so a `git pull` is enough for the next upgrade. Re-run `install.sh` after moving the repo, or to refresh immediately.
+If this checkout still exists at `SOURCE_REPO`, persist copies the full payload (including hooks and the splice patch) into `/usr/local` before re-applying. Re-run `install.sh` after moving the repo, or to refresh immediately.
 
 Status: `python3 ./nct6687_vrm_dkms_inject.py --check`
 

@@ -9,5 +9,5 @@ Target = nct6687d-dkms-git
 [Action]
 Description = Clear unowned NCT6687 DKMS extras before upgrade
 When = PreTransaction
-Exec = /usr/local/sbin/nct6687-vrm-preupgrade
+Exec = /usr/bin/python3 /usr/local/lib/nct6687-vrm/nct6687_vrm_persist.py pre_transaction
 Depends = python
