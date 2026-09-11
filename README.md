@@ -98,6 +98,7 @@ Audit before running. That script installs:
 |------|---------------------|
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm_dkms_inject.py` | `nct6687_vrm_dkms_inject.py` |
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm.inc.c` | `dkms/nct6687_vrm.inc.c` (VRM implementation `#include`'d into the driver) |
+| `/usr/local/lib/nct6687-vrm/nct6687_vrm_decode.h` | `dkms/nct6687_vrm_decode.h` (raw→millisi math, also used by host tests) |
 | `/usr/local/lib/nct6687-vrm/refresh-from-source.sh` | `pacman-hook/refresh-from-source.sh` |
 | `/usr/local/lib/nct6687-vrm/source.env` | written at install (`SOURCE_REPO=` this checkout) |
 | `/usr/local/sbin/nct6687-vrm-preupgrade` | `pacman-hook/nct6687-vrm-preupgrade` |

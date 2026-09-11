@@ -1,0 +1,96 @@
+{
+  "comment": "Integer millisi (mV, mA, mW/m°C). Kernel C (dkms/nct6687_vrm_decode.h) and Python (nct6687_vrm_decode.py) must return these exact values. Host binary: tests/vrm_decode.c.",
+  "cases": [
+    {
+      "name": "vout_direct_mode2_0x40",
+      "fn": "decode_vout_mv",
+      "args": [1263, 64, -10],
+      "expect": 1263,
+      "note": "VOUT_MODE 0x40 Direct: raw 0x04ef → 1263 mV"
+    },
+    {
+      "name": "vin_direct_10mV",
+      "fn": "decode_vin_mv",
+      "args": [1214],
+      "expect": 12140,
+      "note": "VIN Direct 10 mV/LSB: raw 0x04be → 12140 mV"
+    },
+    {
+      "name": "linear11_temp_41c",
+      "fn": "linear11_milli",
+      "args": [41],
+      "expect": 41000,
+      "note": "LINEAR11 TEMP 0x0029 → 41000 m°C (41 °C)"
+    },
+    {
+      "name": "linear11_neg_exp_neg_mant",
+      "fn": "linear11_milli",
+      "args": [63483],
+      "expect": -1250,
+      "note": "LINEAR11 0xf7fb: N=-2, Y=-5 → -1250 millisi"
+    },
+    {
+      "name": "linear11_neg_truncation",
+      "fn": "linear11_milli",
+      "args": [59391],
+      "expect": -62,
+      "note": "LINEAR11 0xe7ff: N=-4, Y=-1 → integer 1000>>4 = 62, signed -62 (not float -62.5)"
+    },
+    {
+      "name": "vout_linear16_n_from_mode",
+      "fn": "decode_vout_mv",
+      "args": [1263, 22, -10],
+      "expect": 1233,
+      "note": "VOUT LINEAR16 mode 0, VOUT_MODE 0x16 → N=-10; raw 0x04ef → (1263*1000)>>10 = 1233 mV"
+    },
+    {
+      "name": "iout_fallback_0x00e5",
+      "fn": "decode_iout_fallback_ma",
+      "args": [229],
+      "expect": 28625,
+      "note": "IOUT fallback raw 0x00e5 → (229*1000)>>3 = 28625 mA"
+    },
+    {
+      "name": "clamp_exp_high",
+      "fn": "clamp_exp",
+      "args": [20],
+      "expect": 15,
+      "note": "exponents above 15 clamp to 15"
+    },
+    {
+      "name": "clamp_exp_low",
+      "fn": "clamp_exp",
+      "args": [-20],
+      "expect": -16,
+      "note": "exponents below -16 clamp to -16"
+    },
+    {
+      "name": "clamp_exp_edges",
+      "fn": "clamp_exp",
+      "args": [15],
+      "expect": 15,
+      "note": "in-range exponent 15 unchanged"
+    },
+    {
+      "name": "vout_fallback_exp_clamped_high",
+      "fn": "decode_vout_mv",
+      "args": [8, 32, 20],
+      "expect": 262144000,
+      "note": "VID mode 0x20 uses fallback_exp; 20 clamps to 15; (8*1000)<<15"
+    },
+    {
+      "name": "vout_fallback_exp_clamped_low",
+      "fn": "decode_vout_mv",
+      "args": [65535, 32, -20],
+      "expect": 999,
+      "note": "fallback_exp -20 clamps to -16; (65535*1000)>>16 = 999"
+    },
+    {
+      "name": "linear11_n_neg16_shift_clamped",
+      "fn": "linear11_milli",
+      "args": [32769],
+      "expect": 0,
+      "note": "LINEAR11 0x8001 N=-16, Y=1: right-shift uses clamp(16)=15, so 1000>>15 = 0"
+    }
+  ]
+}
