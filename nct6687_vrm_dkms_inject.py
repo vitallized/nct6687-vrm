@@ -29,6 +29,8 @@ DECODE_NAME = "nct6687_vrm_decode.h"
 VRM_FILES = (INC_NAME, DECODE_NAME)
 REPO_ROOT = Path(__file__).resolve().parent
 
+# Splice payload only. The include reads these via struct nct6687_data
+# after inject_text inserts them; do not duplicate the list in C.
 STRUCT_FIELDS = """
 	/* VRM PMBus (eSIO): PAGE0=CPU, PAGE1=GT */
 	bool vrm_enabled;
@@ -75,10 +77,11 @@ STRUCT_FIELDS = """
 	long vrm_gt_temp_max;
 """
 
-FORWARD_DECL = (
-    "\nstatic struct nct6687_data *nct6687_update_device(struct device *dev);\n"
-    "static void nct6687_update_vrm(struct nct6687_data *data);\n"
-)
+# The include defines nct6687_update_vrm and no longer calls
+# nct6687_update_device (nct_vrm_touch_and_update goes straight to
+# update_vrm). The hook call is in nct6687_update_device, so only
+# update_vrm needs a forward declaration before that function.
+FORWARD_DECL = "\nstatic void nct6687_update_vrm(struct nct6687_data *data);\n"
 
 # Thin splice — bulk implementation is in INC_NAME
 VRM_INCLUDE = f"""
@@ -293,29 +296,36 @@ def patch_makefile(pkg_dir: Path) -> None:
     print("Patched", mf)
 
 
+def _require_anchor(text: str, needle: str, name: str, hint: str = "") -> None:
+    """Fail with the named exact-string anchor so a mismatch is diagnosable."""
+    if needle not in text:
+        extra = f" — {hint}" if hint else " — driver layout changed"
+        raise SystemExit(f"anchor {name} not found{extra}")
+
+
 def inject_text(text: str) -> str:
     if MARKER in text:
         raise SystemExit("Already injected (marker present)")
 
-    if "#define IOREGION_LENGTH 4" not in text:
-        raise SystemExit("IOREGION_LENGTH 4 not found — driver layout changed")
-    text = text.replace("#define IOREGION_LENGTH 4", "#define IOREGION_LENGTH 8", 1)
+    ioregion = "#define IOREGION_LENGTH 4"
+    _require_anchor(text, ioregion, "IOREGION_LENGTH 4")
+    text = text.replace(ioregion, "#define IOREGION_LENGTH 8", 1)
 
     needle = "\tstruct mutex update_lock;"
-    if needle not in text:
-        raise SystemExit("struct field anchor not found")
-    EXTRA_GROUPS_OLD = "const struct attribute_group *extra_groups[2];"
-    EXTRA_GROUPS_NEW = "const struct attribute_group *extra_groups[3];"
-    if EXTRA_GROUPS_OLD not in text:
-        raise SystemExit(
-            "extra_groups[2] not found — driver group registration changed again"
-        )
-    text = text.replace(EXTRA_GROUPS_OLD, EXTRA_GROUPS_NEW, 1)
+    _require_anchor(text, needle, "struct mutex update_lock")
+    extra_groups_old = "const struct attribute_group *extra_groups[2];"
+    extra_groups_new = "const struct attribute_group *extra_groups[3];"
+    _require_anchor(
+        text,
+        extra_groups_old,
+        "extra_groups[2]",
+        "driver group registration changed again",
+    )
+    text = text.replace(extra_groups_old, extra_groups_new, 1)
     text = text.replace(needle, STRUCT_FIELDS + "\n" + needle, 1)
 
     upd_sig = "static struct nct6687_data *nct6687_update_device(struct device *dev)"
-    if upd_sig not in text:
-        raise SystemExit("nct6687_update_device signature not found")
+    _require_anchor(text, upd_sig, "nct6687_update_device signature")
     text = text.replace(upd_sig, FORWARD_DECL + VRM_INCLUDE + upd_sig, 1)
 
     upd_end = (
@@ -336,20 +346,18 @@ def inject_text(text: str) -> str:
         "\treturn data;\n"
         "}"
     )
-    if upd_end not in text:
-        raise SystemExit("update_device end anchor not found")
+    _require_anchor(text, upd_end, "nct6687_update_device end")
     text = text.replace(upd_end, upd_end_new, 1)
 
     probe_anchor = "\tnct6687_setup_voltages(data);\n"
-    if probe_anchor not in text:
-        raise SystemExit("probe setup anchor not found")
+    _require_anchor(text, probe_anchor, "nct6687_setup_voltages")
     text = text.replace(probe_anchor, probe_anchor + PROBE_ENABLE, 1)
 
-    EXTRA_GROUPS_ASSIGN_OLD = (
+    extra_groups_assign_old = (
         "\tif (nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)\n"
         "\t\tdata->extra_groups[0] = &nct6687_fan_watchdog_group;\n"
     )
-    EXTRA_GROUPS_ASSIGN_NEW = (
+    extra_groups_assign_new = (
         "\t{\n"
         "\t\tint eg = 0;\n\n"
         "\t\tif (nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)\n"
@@ -358,11 +366,13 @@ def inject_text(text: str) -> str:
         "\t\t\tdata->extra_groups[eg++] = &nct6687_vrm_group;\n"
         "\t}\n"
     )
-    if EXTRA_GROUPS_ASSIGN_OLD not in text:
-        raise SystemExit(
-            "fan_watchdog extra_groups assignment not found — anchor changed"
-        )
-    text = text.replace(EXTRA_GROUPS_ASSIGN_OLD, EXTRA_GROUPS_ASSIGN_NEW, 1)
+    _require_anchor(
+        text,
+        extra_groups_assign_old,
+        "fan_watchdog extra_groups assignment",
+        "anchor changed",
+    )
+    text = text.replace(extra_groups_assign_old, extra_groups_assign_new, 1)
     return text
 
 
