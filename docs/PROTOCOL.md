@@ -36,7 +36,7 @@ What we use on MS-7D89:
 | VOUT `0x8B` | If `VOUT_MODE` mode bits = Direct (`0x40` → mode 2): treat raw as **mV** (R=3 style). Else LINEAR16 using mode N or `vrm_vout_exp`. Helpers: `nct_vrm_decode_vout_mv` / `decode_vout_mv`. |
 | VIN `0x88` | Direct **10 mV/LSB** via `nct_vrm_decode_vin_mv` / `decode_vin_mv` (`raw * 10` → mV), i.e. m=1, b=0, R=2 style. |
 | POUT `0x96`, TEMP `0x8D` | LINEAR11 via `nct_vrm_linear11_milli` / `linear11_milli` (integer millisi, matching HWiNFO on this board). |
-| IOUT | Prefer `POUT / VOUT` when VOUT > 0.2 V (sample caller). Else `nct_vrm_decode_iout_fallback_ma` / `decode_iout_fallback_ma`: `(raw * 1000) >> 3` milliamps (LINEAR16 N=-3). |
+| IOUT | Prefer `nct_vrm_iout_from_pv_ma` / `iout_from_pv_ma` (`(p_mw * 1000) / v_mv` milliamps) when VOUT > 200 mV (sample caller). Else `nct_vrm_decode_iout_fallback_ma` / `decode_iout_fallback_ma`: `(raw * 1000) >> 3` milliamps (LINEAR16 N=-3). |
 
 **These Direct coefficients were not taken from a Renesas datasheet citation in this repo.** They were chosen because they matched HWiNFO / known-good rail values on this board after the PMBus path worked. LINEAR11 for power/temp is standard; the Direct VOUT/VIN scaling is **board- and part-specific inference**. Kernel C and the userspace reader share one millisi decode (`dkms/nct6687_vrm_decode.h`, `nct6687_vrm_decode.py`); `tests/golden_vrm_decode.json` is the raw→SI table both must match.
 

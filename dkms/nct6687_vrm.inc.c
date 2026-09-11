@@ -25,142 +25,23 @@ static int vrm_vout_exp = -10;
 module_param(vrm_vout_exp, int, 0444);
 MODULE_PARM_DESC(vrm_vout_exp, "Fallback LINEAR16 exp if VOUT_MODE unknown (-16..15)");
 
-#define NCT_VRM_SMB_EN 0x80
-#define NCT_VRM_SMB_START 0x40
-#define NCT_VRM_SMB_CLEAR 0x08
-#define NCT_VRM_PROTO_WBR 0x02
-#define NCT_VRM_PROTO_RB 0x82
-#define NCT_VRM_PROTO_RW 0x83
-
 #include "nct6687_vrm_decode.h"
+#include "nct6687_vrm_mailbox.h"
 
-/*
- * Caller must hold data->EC_io_lock.
- * Stock nct6687_read/write leave PAGE != 0xff. Under EC_io_lock nothing else
- * can be mid-eSIO — force idle select; fail if PAGE never settles.
- */
-static int nct_vrm_idle(struct nct6687_data* data)
+static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
 {
-    int i;
-
-    if (inb_p(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET) == 0xff)
-        return 0;
-    outb_p(0xff, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
-    for (i = 0; i < 10; i++) {
-        if (inb_p(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET) == 0xff)
-            return 0;
-        udelay(100);
-    }
-    return -EBUSY;
-}
-
-static int nct_vrm_esio_write(struct nct6687_data* data, u8 index, u8 value)
-{
-    if (nct_vrm_idle(data))
-        return -EBUSY;
-    outb_p(0x04, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
-    outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
-    outb_p(value, data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
-    outb_p(0xff, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
-    return 0;
-}
-
-static int nct_vrm_esio_read(struct nct6687_data* data, u8 page, u8 index, u8* out)
-{
-    if (nct_vrm_idle(data))
-        return -EBUSY;
-    outb_p(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
-    outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
-    *out = inb_p(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
-    outb_p(0xff, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
-    return 0;
-}
-
-static int nct_vrm_prep_clear(struct nct6687_data* data)
-{
-    u8 ctrl;
-
-    if (nct_vrm_esio_write(data, 0x03, 0xff) || nct_vrm_esio_write(data, 0x04, 0xff) || nct_vrm_esio_read(data, 4, 0x60, &ctrl) || nct_vrm_esio_write(data, 0x60, (ctrl | NCT_VRM_SMB_CLEAR) & ~NCT_VRM_SMB_START) || nct_vrm_esio_write(data, 0x60, ctrl & ~(NCT_VRM_SMB_START | NCT_VRM_SMB_CLEAR)))
-        return -EIO;
-    return 0;
-}
-
-static int nct_vrm_wait_start_clear(struct nct6687_data* data)
-{
-    int i;
-    u8 ctrl;
-
-    for (i = 0; i < 100; i++) {
-        if (nct_vrm_esio_read(data, 4, 0x60, &ctrl))
-            return -EIO;
-        if (!(ctrl & NCT_VRM_SMB_START))
-            return 0;
-        usleep_range(500, 1000);
-    }
-    return -ETIMEDOUT;
-}
-
-static void nct_vrm_invalidate_smbus(struct nct6687_data* data);
-
-static void nct_vrm_bus_recover(struct nct6687_data* data)
-{
-    nct_vrm_invalidate_smbus(data);
-    nct_vrm_prep_clear(data);
-    nct_vrm_esio_write(data, 0x60, 0x00);
-}
-
-static int nct_vrm_write_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8 value)
-{
-    u8 sts;
-
-    if (nct_vrm_prep_clear(data) || nct_vrm_esio_write(data, 0x63, NCT_VRM_PROTO_WBR) || nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd) || nct_vrm_esio_write(data, 0x70, value) || nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
-        return -EIO;
-    usleep_range(500, 1000);
-    if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
-        return -EIO;
-    if (nct_vrm_wait_start_clear(data))
-        return -ETIMEDOUT;
-    if (nct_vrm_esio_read(data, 4, 0x03, &sts))
-        return -EIO;
-    return sts ? -EIO : 0;
-}
-
-static int nct_vrm_read_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8* out)
-{
-    u8 sts, lo;
-
-    if (nct_vrm_prep_clear(data) || nct_vrm_esio_write(data, 0x63, NCT_VRM_PROTO_RB) || nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd) || nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
-        return -EIO;
-    usleep_range(500, 1000);
-    if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
-        return -EIO;
-    if (nct_vrm_wait_start_clear(data))
-        return -ETIMEDOUT;
-    if (nct_vrm_esio_read(data, 4, 0x03, &sts) || sts)
-        return -EIO;
-    if (nct_vrm_esio_read(data, 4, 0xb0, &lo))
-        return -EIO;
-    *out = lo;
-    return 0;
-}
-
-static int nct_vrm_read_word(struct nct6687_data* data, u8 addr, u8 cmd, u16* out)
-{
-    u8 lo, hi, sts;
-
-    if (nct_vrm_prep_clear(data) || nct_vrm_esio_write(data, 0x63, NCT_VRM_PROTO_RW) || nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd) || nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
-        return -EIO;
-    usleep_range(500, 1000);
-    if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
-        return -EIO;
-    if (nct_vrm_wait_start_clear(data))
-        return -ETIMEDOUT;
-    if (nct_vrm_esio_read(data, 4, 0x03, &sts) || sts)
-        return -EIO;
-    if (nct_vrm_esio_read(data, 4, 0xb0, &lo) || nct_vrm_esio_read(data, 4, 0xb1, &hi))
-        return -EIO;
-    *out = lo | (hi << 8);
-    return 0;
+    data->vrm_enabled = enabled;
+    data->vrm_valid = false;
+    data->vrm_gt_valid = false;
+    data->vrm_demand = false;
+    data->vrm_last_updated = 0;
+    data->vrm_last_read = 0;
+    data->vrm_read_gap = 0;
+    data->vrm_smbus_page = -1;
+    data->vrm_vout_mode_valid[0] = false;
+    data->vrm_vout_mode_valid[1] = false;
+    data->vrm_hist_init = false;
+    data->vrm_gt_hist_init = false;
 }
 
 static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
@@ -168,6 +49,12 @@ static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
     data->vrm_smbus_page = -1;
     data->vrm_vout_mode_valid[0] = false;
     data->vrm_vout_mode_valid[1] = false;
+}
+
+static void nct_vrm_bus_recover(struct nct6687_data* data)
+{
+    nct_vrm_invalidate_smbus(data);
+    nct_vrm_recover(data);
 }
 
 /*
@@ -221,7 +108,7 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
     p_mw = nct_vrm_linear11_milli(pout);
     t_mc = nct_vrm_linear11_milli(temp);
     if (v_mv > 200) {
-        i_ma = (p_mw * 1000L) / v_mv;
+        i_ma = nct_vrm_iout_from_pv_ma(p_mw, v_mv);
     } else {
         if (nct_vrm_read_word(data, addr, 0x8c, &iout)) {
             nct_vrm_invalidate_smbus(data);

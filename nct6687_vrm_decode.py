@@ -60,6 +60,16 @@ def decode_iout_fallback_ma(raw: int) -> int:
     return ((raw & 0xFFFF) * 1000) >> 3
 
 
+def iout_from_pv_ma(p_mw: int, v_mv: int) -> int:
+    """IOUT mA from POUT mW and VOUT mV. Toward-zero like C `/`."""
+    if v_mv == 0:
+        return 0
+    num = p_mw * 1000
+    neg = (num < 0) ^ (v_mv < 0)
+    q = abs(num) // abs(v_mv)
+    return -q if neg else q
+
+
 def linear11(raw: int) -> float:
     """SI units (W, °C, …) from LINEAR11, truncated the same way as millisi."""
     return linear11_milli(raw) / 1000.0

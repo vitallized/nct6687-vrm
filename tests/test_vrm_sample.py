@@ -111,7 +111,7 @@ def test_vout_above_200mv_skips_iout_0x8c() -> None:
     assert s.iout_method == "P/V"
     assert s.vout_v == pytest.approx(1.234)
     assert s.pout_w == pytest.approx(50.0)
-    assert s.iout_a == pytest.approx(50.0 / 1.234)
+    assert s.iout_a == pytest.approx(40518 / 1000.0)
 
 
 def test_vout_at_200mv_reads_iout_0x8c() -> None:
