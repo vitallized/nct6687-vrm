@@ -87,6 +87,30 @@ def test_struct_fields_inserted(snippet: str) -> None:
     out = inject.inject_text(snippet)
     assert inject.STRUCT_FIELDS in out
     assert out.index("bool vrm_enabled;") < out.index("\tstruct mutex update_lock;")
+    assert "int vrm_smbus_page;" in out
+    assert "bool vrm_hist_init;" in out
+
+
+def test_kernels_for_rebuild_puts_running_first() -> None:
+    assert inject.kernels_for_rebuild(
+        ["6.18.48-1-cachyos-lts", "7.2.3-1-cachyos", "7.3.0-rc1-1-cachyos-rc"],
+        "7.2.3-1-cachyos",
+    ) == ["7.2.3-1-cachyos", "6.18.48-1-cachyos-lts", "7.3.0-rc1-1-cachyos-rc"]
+
+
+def test_re_inject_from_stock_replaces_stale_struct(snippet: str, tmp_path: Path) -> None:
+    """--install used to copy a new include onto an old spliced nct6687.c."""
+    stock = tmp_path / "nct6687.c"
+    stock.write_text(snippet)
+    first = inject.inject_text(snippet)
+    stale = first.replace("\tint vrm_smbus_page;\n", "")
+    assert "int vrm_smbus_page;" not in stale
+    bak = tmp_path / "nct6687.c.pre-vrm"
+    bak.write_text(snippet)
+    stock.write_text(stale)
+    # Same path inject() takes when MARKER is already present.
+    stock.write_text(inject.inject_text(bak.read_text()))
+    assert "int vrm_smbus_page;" in stock.read_text()
 
 
 def test_forward_decl_is_only_update_vrm(snippet: str) -> None:
