@@ -93,9 +93,9 @@ def test_struct_fields_inserted(snippet: str) -> None:
 
 def test_kernels_for_rebuild_puts_running_first() -> None:
     assert inject.kernels_for_rebuild(
-        ["6.18.48-1-cachyos-lts", "7.2.3-1-cachyos", "7.3.0-rc1-1-cachyos-rc"],
-        "7.2.3-1-cachyos",
-    ) == ["7.2.3-1-cachyos", "6.18.48-1-cachyos-lts", "7.3.0-rc1-1-cachyos-rc"]
+        ["6.1.0-lts", "6.12.0-current", "6.13.0-rc"],
+        "6.12.0-current",
+    ) == ["6.12.0-current", "6.1.0-lts", "6.13.0-rc"]
 
 
 def test_re_inject_from_stock_replaces_stale_struct(snippet: str, tmp_path: Path) -> None:
