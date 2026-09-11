@@ -48,6 +48,31 @@ STRUCT_FIELDS = """
 	long vrm_gt_iout;
 	long vrm_gt_pout;
 	long vrm_gt_temp;
+	int vrm_smbus_page;
+	u8 vrm_vout_mode_cache[2];
+	bool vrm_vout_mode_valid[2];
+	bool vrm_hist_init;
+	long vrm_vout_min;
+	long vrm_vout_max;
+	long vrm_vin_min;
+	long vrm_vin_max;
+	long vrm_iout_min;
+	long vrm_iout_max;
+	long vrm_pout_min;
+	long vrm_pout_max;
+	long vrm_temp_min;
+	long vrm_temp_max;
+	bool vrm_gt_hist_init;
+	long vrm_gt_vout_min;
+	long vrm_gt_vout_max;
+	long vrm_gt_vin_min;
+	long vrm_gt_vin_max;
+	long vrm_gt_iout_min;
+	long vrm_gt_iout_max;
+	long vrm_gt_pout_min;
+	long vrm_gt_pout_max;
+	long vrm_gt_temp_min;
+	long vrm_gt_temp_max;
 """
 
 FORWARD_DECL = (
@@ -68,6 +93,11 @@ PROBE_ENABLE = """
 	data->vrm_last_read = 0;
 	data->vrm_read_gap = 0;
 	data->vrm_demand = false;
+	data->vrm_smbus_page = -1;
+	data->vrm_vout_mode_valid[0] = false;
+	data->vrm_vout_mode_valid[1] = false;
+	data->vrm_hist_init = false;
+	data->vrm_gt_hist_init = false;
 	if (data->vrm_enabled)
 		dev_info(dev, "VRM PMBus eSIO sensors enabled (addr=0x%02x vout_exp=%d gt=%d)\\n",
 			 vrm_addr & 0xff, vrm_vout_exp, vrm_gt ? 1 : 0);
