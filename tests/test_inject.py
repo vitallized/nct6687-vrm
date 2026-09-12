@@ -113,6 +113,30 @@ def test_kernels_for_rebuild_puts_running_first() -> None:
     ) == ["6.12.0-current", "6.1.0-lts", "6.13.0-rc"]
 
 
+def test_kernels_for_rebuild_unions_header_only_kernels() -> None:
+    assert inject.kernels_for_rebuild(
+        ["6.12.0-current"],
+        "6.12.0-current",
+        extra=["6.13.0-new"],
+    ) == ["6.12.0-current", "6.13.0-new"]
+
+
+def test_modules_with_headers_lists_build_dirs(tmp_path: Path) -> None:
+    (tmp_path / "6.12.0" / "build").mkdir(parents=True)
+    (tmp_path / "6.13.0" / "not-build").mkdir(parents=True)
+    assert inject.modules_with_headers(tmp_path) == ["6.12.0"]
+
+
+def test_rebuild_skips_running_kernel_without_headers(tmp_path: Path) -> None:
+    missing = tmp_path / "no-build"
+    reason = inject.rebuild_skip_reason("7.2.3-old", "7.2.3-old", missing)
+    assert reason is not None
+    assert "Skipping running kernel" in reason
+    have = tmp_path / "build"
+    have.mkdir()
+    assert inject.rebuild_skip_reason("7.2.4-new", "7.2.3-old", have) is None
+
+
 def test_re_inject_from_stock_restores_data_include(snippet: str, tmp_path: Path) -> None:
     """--install used to copy a new include onto an old spliced nct6687.c."""
     stock = tmp_path / "nct6687.c"

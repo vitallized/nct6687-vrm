@@ -116,9 +116,18 @@ def post_transaction(
     if not payload_installed(layout):
         print("persist: missing payload — cannot re-splice", file=sys.stderr)
         return 1
-    src = src or inject.find_src()
+    if src is None:
+        try:
+            src = inject.find_src()
+        except SystemExit as exc:
+            print("persist: no nct6687d sources — skip splice:", exc, file=sys.stderr)
+            return 0
     print("Re-applying VRM splice to", src)
-    inject.inject(src)
+    try:
+        inject.inject(src)
+    except SystemExit as exc:
+        print("persist: splice failed (driver layout changed?):", exc, file=sys.stderr)
+        return 1
     if rebuild is None:
         inject.rebuild(
             src,

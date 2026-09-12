@@ -125,7 +125,7 @@ def apply_splice_text(stock: str, patch: Path | None = None) -> str:
         return (root / "nct6687.c").read_text()
 
 
-def _pacman_owned_files(pkg_prefix: str = "nct6687d-dkms-git-") -> set[str]:
+def _pacman_owned_files(pkg_prefix: str = "nct6687d-dkms") -> set[str]:
     """Paths from the local alpm files db (no `pacman` CLI — safe in hooks)."""
     owned: set[str] = set()
     if not PACMAN_LOCAL.is_dir():
@@ -468,29 +468,68 @@ def verify_compile(src: Path) -> Path:
     return kos[0]
 
 
-def kernels_for_rebuild(installed: list[str], current: str) -> list[str]:
-    """Running kernel first so a stale extra kernel cannot block the live one."""
-    rest = [k for k in installed if k != current]
-    return [current] + rest
+def modules_with_headers(modules_root: Path | None = None) -> list[str]:
+    """Kernels that have a headers tree, whether or not DKMS has installed them."""
+    root = modules_root or Path("/usr/lib/modules")
+    if not root.is_dir():
+        return []
+    found: list[str] = []
+    for build in sorted(root.glob("*/build")):
+        if build.is_dir():
+            found.append(build.parent.name)
+    return found
+
+
+def kernels_for_rebuild(
+    installed: list[str], current: str, extra: list[str] | None = None
+) -> list[str]:
+    """Running kernel first so a stale extra kernel cannot block the live one.
+
+    `extra` is usually kernels that have headers but are not yet in `dkms status`.
+    """
+    seen = {current}
+    out = [current]
+    for k in [*installed, *(extra or [])]:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+def rebuild_skip_reason(kver: str, current: str, headers: Path) -> str | None:
+    """Skip kernels with no headers. Never fatal just because kver is current.
+
+    Topgrade often upgrades linux (drops outgoing headers) before nct6687d.
+    The post-upgrade hook still runs on the old kernel; aborting there left
+    the new kernel's .ko stock.
+    """
+    if headers.is_dir():
+        return None
+    if kver == current:
+        return (
+            f"Skipping running kernel {kver}: no headers at {headers} "
+            "(kernel already upgraded; rebuild the others)"
+        )
+    return f"Skipping {kver}: no kernel headers at {headers}"
 
 
 def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
     pkg_dir = src.parent
     pname, pver = parse_dkms(pkg_dir)
-    kvers = kernels_for_rebuild(installed_kernels(pname, pver), os.uname().release)
+    kvers = kernels_for_rebuild(
+        installed_kernels(pname, pver),
+        os.uname().release,
+        extra=modules_with_headers(),
+    )
     current = os.uname().release
     print(f"Rebuilding {pname}/{pver} for kernels: {', '.join(kvers)}")
     built = 0
     failed: list[str] = []
     for kver in kvers:
         headers = Path(f"/lib/modules/{kver}/build")
-        if not headers.is_dir():
-            msg = f"Skipping {kver}: no kernel headers at {headers}"
-            if kver == current:
-                raise SystemExit(
-                    f"No kernel headers for running kernel {kver} ({headers})"
-                )
-            print(msg)
+        skip = rebuild_skip_reason(kver, current, headers)
+        if skip:
+            print(skip)
             continue
         # install --force alone reuses stale builds; source was patched in-place
         print(f"--- dkms build -k {kver} --force ---")
@@ -669,6 +708,16 @@ def check() -> int:
         print(env.read_text().rstrip())
     else:
         print("source.env: missing")
+    vrm_sys = Path("/sys/module/nct6687/parameters/vrm")
+    if Path("/sys/module/nct6687").is_dir():
+        if injected and not vrm_sys.is_file():
+            print(
+                "Live module: stock (no vrm param) — source is spliced but "
+                "this kernel's .ko was not rebuilt"
+            )
+            stale = True
+        elif vrm_sys.is_file():
+            print("Live module param vrm=" + vrm_sys.read_text().strip())
     if unexpected or stale:
         return 1
     return 0
