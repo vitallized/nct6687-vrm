@@ -1,9 +1,12 @@
-# Re-apply eSIO PMBus VRM splice after nct6687d-dkms-git is replaced by pacman.
+# Re-apply the eSIO VRM splice after nct6687d sources or kernel headers land.
+# Path triggers match 70-dkms-install.hook so we run after DKMS's own install
+# (this filename sorts after 70-*). Package-only Target missed linux-only upgrades.
 [Trigger]
 Operation = Install
 Operation = Upgrade
-Type = Package
-Target = nct6687d-dkms-git
+Type = Path
+Target = usr/src/nct6687d*/dkms.conf
+Target = usr/lib/modules/*/build/include/
 
 [Action]
 Description = Re-apply NCT6687 VRM splice and rebuild DKMS

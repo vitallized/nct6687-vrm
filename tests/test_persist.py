@@ -36,7 +36,11 @@ def test_install_writes_full_payload(tmp_path: Path) -> None:
     assert (layout.modprobe_d / "nct6687-vrm.conf").is_file()
     hook = (layout.hook_dir / "nct6687-vrm-reinject.hook").read_text()
     assert "nct6687_vrm_persist.py post_transaction" in hook
+    assert "Type = Path" in hook
+    assert "usr/lib/modules/*/build/include/" in hook
     assert "/usr/local/sbin/" not in hook
+    pre = (layout.hook_dir / "nct6687-vrm-preupgrade.hook").read_text()
+    assert "Target = nct6687d-dkms*" in pre
 
 
 def test_refresh_updates_hooks(tmp_path: Path) -> None:
@@ -69,6 +73,32 @@ def test_pre_transaction_clears_unowned(
 def test_pre_missing_payload_is_zero(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     assert persist.pre_transaction(layout, repo=tmp_path / "gone") == 0
+
+
+def test_post_missing_src_is_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    persist.install(ROOT, layout)
+
+    def gone() -> Path:
+        raise SystemExit("No /usr/src/nct6687d*/nct6687.c found")
+
+    monkeypatch.setattr(inject, "find_src", gone)
+    assert persist.post_transaction(layout, ROOT) == 0
+
+
+def test_post_splice_reject_is_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    persist.install(ROOT, layout)
+    src = tmp_path / "nct6687.c"
+    src.write_text("stock\n")
+    monkeypatch.setattr(
+        inject, "inject", lambda _src: (_ for _ in ()).throw(SystemExit("rejected"))
+    )
+    assert persist.post_transaction(layout, ROOT, src=src, rebuild=lambda _s: None) == 1
 
 
 def test_post_missing_payload_is_one(tmp_path: Path) -> None:

@@ -86,7 +86,7 @@ That adds `in22`, `in23`, `curr2`, `power2`, `temp21`.
 
 ### Persist (Arch)
 
-Keeps `vrm=1` across reboot and re-applies the patch when `nct6687d-dkms-git` is upgraded:
+Keeps `vrm=1` across reboot and re-applies the splice when `nct6687d` sources or kernel headers land (linux-only topgrade included):
 
 ```sh
 sudo bash ./pacman-hook/install.sh
@@ -110,7 +110,7 @@ Audit before running. That script installs:
 
 The pre-upgrade hook deletes unowned files in `/usr/src/nct6687d*`. That means the VRM include, `*.pre-vrm` backups, leftover `Kbuild`. Pacman can then extract newly packaged files. This is what blocked `nct6687d-dkms-git` when upstream started shipping `Kbuild`.
 
-The post-upgrade hook rebuilds on disk. It does not unload the running module mid-transaction. Reboot or reload later to pick up the new build.
+The post-upgrade hook rebuilds on disk. It does not unload the running module mid-transaction. Reboot or reload later to pick up the new build. If the splice patch no longer applies, the hook fails and leaves stock `nct6687` — that is the driver-rewrite case.
 
 If this checkout still exists at `SOURCE_REPO`, persist copies the full payload (including hooks and the splice patch) into `/usr/local` before re-applying. Re-run `install.sh` after moving the repo, or to refresh immediately.
 

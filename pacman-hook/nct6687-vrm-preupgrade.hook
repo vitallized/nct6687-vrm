@@ -4,7 +4,7 @@
 Operation = Upgrade
 Operation = Install
 Type = Package
-Target = nct6687d-dkms-git
+Target = nct6687d-dkms*
 
 [Action]
 Description = Clear unowned NCT6687 DKMS extras before upgrade
