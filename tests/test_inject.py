@@ -325,6 +325,31 @@ def _isolate_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inject, "_pacman_owned_files", lambda: set())
 
 
+def test_check_reports_missing_vrm_files_when_injected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Solo pre_transaction deletes live overlay extras; --check must not say ok."""
+    src = tmp_path / "nct6687.c"
+    src.write_text(f"/* {inject.MARKER} */\nstock\n")
+    installed = tmp_path / "lib"
+    running_py = Path(inject.__file__).read_text()
+    _write_installed(
+        installed,
+        persist="ok\n",
+        inject_py=running_py,
+        vrm="ok\n",
+        patch="ok\n",
+    )
+    monkeypatch.setattr(inject, "find_src", lambda: src)
+    monkeypatch.setattr(inject, "_pacman_owned_files", lambda: set())
+    monkeypatch.setattr(inject, "INSTALLED_LIB", installed)
+    monkeypatch.setattr(inject, "REPO_ROOT", installed)
+    assert inject.check() == 1
+    out = capsys.readouterr().out
+    assert "missing" in out.lower()
+    assert inject.INC_NAME in out
+
+
 def test_check_reports_stale_when_source_repo_differs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

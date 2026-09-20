@@ -683,6 +683,15 @@ def check() -> int:
             unexpected.append(p)
     print("DKMS source:", src)
     print("Injected:", injected)
+    missing_tree = []
+    if injected:
+        for name in VRM_FILES:
+            if not (src.parent / name).is_file():
+                missing_tree.append(src.parent / name)
+        if missing_tree:
+            print("DKMS tree missing overlay files (rebuild will fail):")
+            for p in missing_tree:
+                print(" ", p)
     if expected:
         print("Expected extras (cleared automatically on the next package upgrade):")
         for p in expected:
@@ -773,7 +782,7 @@ def check() -> int:
             stale = True
         elif vrm_sys.is_file():
             print("Live module param vrm=" + vrm_sys.read_text().strip())
-    if unexpected or stale:
+    if unexpected or stale or missing_tree:
         return 1
     return 0
 
