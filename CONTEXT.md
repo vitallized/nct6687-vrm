@@ -32,6 +32,14 @@ _Avoid_: vendor, pin, owned nct6687d package
 The members that live on `nct6687_data` for VRM cache, hist, and PAGE/VOUT_MODE state. Spliced as an include inside that struct.
 _Avoid_: STRUCT_FIELDS, Python field list
 
+**software hist**:
+Per-device min/max of PAGE samples. IOUT (mA) and POUT (µW) drop a negative millisi sample so a LINEAR11 spike cannot latch the min. VOUT/VIN/TEMP still take the signed value.
+_Avoid_: hwmon chip min, HWiNFO peak
+
+**VRM demand**:
+A VRM sysfs read (not a fan/temp attr). First demand after idle, or first-ever, uses the 20 ms floor. Background (fan/temp hook) stays 1 Hz. Consecutive PAGE failures back off (HZ/4 → 8 Hz).
+_Avoid_: 1 Hz as the HUD rate
+
 **upgrade persist**:
 Re-apply the DKMS splice after a distro `nct6687d` upgrade without unloading the live module.
 _Avoid_: install path, --install re-splice

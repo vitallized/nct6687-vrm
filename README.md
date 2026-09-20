@@ -73,7 +73,7 @@ sensors
 | `temp20_input` | VR temperature | m°C |
 | `vrm_cpu` | CPU VOUT + IOUT + POUT (one read) | mV mA µW |
 
-Cache defaults to 1 Hz. If something polls VRM hwmon faster, the sample rate follows that poll down to about 20 ms. Fast polling shares `EC_io_lock` with fans and temps, so those reads can stall. VRM sysfs only samples the VR, not the full fan/temp scan. `vrm_cpu` returns VOUT, IOUT, and POUT in one read.
+Background PAGE samples stay at 1 Hz (fan/temp hook). A VRM sysfs demand follows the inter-read gap down to about 20 ms, including the first read after idle. Consecutive sample failures back off (about 4 Hz, then 1 Hz, 0.5 Hz, cap 8 s) so a wedged VR does not hold `EC_io_lock` at 4 Hz forever. Fast demand still shares that lock with fans and temps. VRM sysfs only samples the VR, not the full fan/temp scan. `vrm_cpu` returns VOUT, IOUT, and POUT in one read. Software hist for IOUT/POUT ignores a negative millisi sample.
 
 GT / iGPU is PMBus PAGE 1. Usually idle if you have a discrete GPU:
 
@@ -90,9 +90,11 @@ Keeps `vrm=1` across reboot and re-applies the splice when `nct6687d` sources or
 
 ```sh
 sudo bash ./pacman-hook/install.sh
+# same thing:
+sudo python3 ./nct6687_vrm_persist.py install
 ```
 
-Audit before running. That script installs:
+That copies **this checkout** into `/usr/local` (`SOURCE_REPO=` here). A dirty or behind tree is what the next upgrade will re-apply. Audit before running. It installs:
 
 | Path | Source in this repo |
 |------|---------------------|
@@ -108,11 +110,13 @@ Audit before running. That script installs:
 | `/etc/pacman.d/hooks/nct6687-vrm-reinject.hook` | `pacman-hook/nct6687-vrm-reinject.hook` |
 | `/etc/modprobe.d/nct6687-vrm.conf` | `pacman-hook/nct6687-vrm.conf` (`options nct6687 vrm=1`) |
 
-The pre-upgrade hook deletes unowned files in `/usr/src/nct6687d*`. That means the VRM include, `*.pre-vrm` backups, leftover `Kbuild`. Pacman can then extract newly packaged files. This is what blocked `nct6687d-dkms-git` when upstream started shipping `Kbuild`.
+The pre-upgrade hook deletes unowned overlay leftovers in every `/usr/src/nct6687d*` directory, including leftover trees that no longer have `nct6687.c`. That means the VRM include, sibling headers, `*.pre-vrm` backups, leftover `Kbuild`. Pacman can then extract newly packaged files. This is what blocked `nct6687d-dkms-git` when upstream started shipping `Kbuild`.
 
-The post-upgrade hook rebuilds on disk. It does not unload the running module mid-transaction. Reboot or reload later to pick up the new build. If the splice patch no longer applies, the hook fails and leaves stock `nct6687` — that is the driver-rewrite case.
+The post-upgrade hook rebuilds on disk. It does not unload the running module mid-transaction. Reboot or reload later to pick up the new build. If the splice patch no longer applies, the hook fails and leaves stock `nct6687`. If the splice applied and DKMS rebuild then exits, the hook returns 1 and **leaves the tree spliced**.
 
-If this checkout still exists at `SOURCE_REPO`, persist copies the full payload (including hooks and the splice patch) into `/usr/local` before re-applying. Re-run `install.sh` after moving the repo, or to refresh immediately.
+`refresh` updates `/usr/local` and any `/etc` hook files that `install` already wrote. It does not invent `/etc` hooks. `--check` from `/usr/local` compares the installed payload to `SOURCE_REPO`, not to itself.
+
+Re-run `install.sh` after moving the repo, or to refresh immediately.
 
 Status: `python3 ./nct6687_vrm_dkms_inject.py --check`
 
