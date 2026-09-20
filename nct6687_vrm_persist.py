@@ -73,6 +73,17 @@ def refresh(layout: PersistLayout, repo: Path | None = None) -> bool:
             continue
         shutil.copy2(src, dst)
         changed = True
+    for name, rel in _PAYLOAD:
+        if not name.endswith(".hook"):
+            continue
+        src = repo / rel
+        dst = layout.hook_dir / name
+        if not dst.is_file():
+            continue
+        if src.read_bytes() == dst.read_bytes():
+            continue
+        shutil.copy2(src, dst)
+        changed = True
     if changed:
         print("Refreshed", layout.lib, "from", repo, file=sys.stderr)
     return True
