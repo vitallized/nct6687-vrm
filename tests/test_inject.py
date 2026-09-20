@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -251,3 +252,99 @@ def test_committed_patch_matches_inject_text_on_stock() -> None:
         pytest.skip("no stock nct6687.c backup")
     text = stocks[-1].read_text()
     assert inject.apply_splice_text(text) == inject.inject_text(text)
+
+
+def _write_installed(
+    lib: Path, *, persist: str, inject_py: str, vrm: str, patch: str
+) -> None:
+    lib.mkdir(parents=True, exist_ok=True)
+    (lib / "nct6687_vrm_dkms_inject.py").write_text(inject_py)
+    (lib / "nct6687_vrm_persist.py").write_text(persist)
+    for name in inject.VRM_FILES:
+        (lib / name).write_text(vrm)
+    (lib / inject.PATCH_NAME).write_text(patch)
+
+
+def _write_checkout(
+    repo: Path, *, persist: str, inject_py: str, vrm: str, patch: str
+) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "nct6687_vrm_dkms_inject.py").write_text(inject_py)
+    (repo / "nct6687_vrm_persist.py").write_text(persist)
+    (repo / "dkms").mkdir()
+    for name in inject.VRM_FILES:
+        (repo / "dkms" / name).write_text(vrm)
+    (repo / "patches").mkdir()
+    (repo / "patches" / inject.PATCH_NAME).write_text(patch)
+
+
+def _isolate_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stock = tmp_path / "nct6687.c"
+    stock.write_text("stock\n")
+    monkeypatch.setattr(inject, "find_src", lambda: stock)
+    monkeypatch.setattr(inject, "_pacman_owned_files", lambda: set())
+
+
+def test_check_reports_stale_when_source_repo_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = tmp_path / "lib"
+    checkout = tmp_path / "checkout"
+    running_py = Path(inject.__file__).read_text()
+    _write_installed(
+        installed, persist="old\n", inject_py=running_py, vrm="v\n", patch="p\n"
+    )
+    _write_checkout(
+        checkout, persist="new\n", inject_py=running_py, vrm="v\n", patch="p\n"
+    )
+    (installed / "source.env").write_text(f"SOURCE_REPO={checkout}\n")
+    monkeypatch.setattr(inject, "INSTALLED_LIB", installed)
+    monkeypatch.setattr(inject, "REPO_ROOT", installed)
+    _isolate_check(tmp_path, monkeypatch)
+    assert inject.check() == 1
+    out = capsys.readouterr().out
+    assert "STALE" in out
+    assert "persist" in out.lower()
+
+
+def test_check_ok_when_installed_matches_source_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = tmp_path / "lib"
+    checkout = tmp_path / "checkout"
+    _write_installed(
+        installed,
+        persist="from-checkout\n",
+        inject_py="from-checkout\n",
+        vrm="from-checkout\n",
+        patch="from-checkout\n",
+    )
+    _write_checkout(
+        checkout,
+        persist="from-checkout\n",
+        inject_py="from-checkout\n",
+        vrm="from-checkout\n",
+        patch="from-checkout\n",
+    )
+    (installed / "source.env").write_text(f"SOURCE_REPO={checkout}\n")
+    monkeypatch.setattr(inject, "INSTALLED_LIB", installed)
+    monkeypatch.setattr(inject, "REPO_ROOT", installed)
+    _isolate_check(tmp_path, monkeypatch)
+    assert inject.check() == 0
+    assert "STALE" not in capsys.readouterr().out
+
+
+def test_check_without_source_repo_compares_running_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = tmp_path / "lib"
+    installed.mkdir()
+    shutil.copy2(ROOT / "nct6687_vrm_dkms_inject.py", installed / "nct6687_vrm_dkms_inject.py")
+    (installed / "nct6687_vrm_persist.py").write_text("stale persist\n")
+    for name in inject.VRM_FILES:
+        shutil.copy2(ROOT / "dkms" / name, installed / name)
+    shutil.copy2(ROOT / "patches" / inject.PATCH_NAME, installed / inject.PATCH_NAME)
+    monkeypatch.setattr(inject, "INSTALLED_LIB", installed)
+    _isolate_check(tmp_path, monkeypatch)
+    assert inject.check() == 1
+    assert "STALE" in capsys.readouterr().out
