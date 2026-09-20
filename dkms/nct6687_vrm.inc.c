@@ -134,8 +134,8 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     u8 cfg_save, baud_save;
     u8 addr;
     long vout_mv, vin_mv, iout_ma, pout_uw, temp_mc;
-    unsigned long now, floor, interval;
-    bool demanded;
+    unsigned long now, floor, gap, age;
+    bool demanded, last_read_set;
 
     if (!data->vrm_enabled)
         return;
@@ -144,6 +144,8 @@ static void nct6687_update_vrm(struct nct6687_data* data)
      * Rate-limit even when invalid: a wedged VR/mux must not be hammered at
      * hwmon poll rate. Background / non-VRM paths: 1 Hz. VRM sysfs demand:
      * match inter-read gap down to ~20 ms. After failure: retry at ~4 Hz.
+     * First demand after idle (or first-ever) uses the 20 ms floor — not 1 Hz
+     * just because last_read is 0 or aged >= 1 s.
      */
     demanded = data->vrm_demand;
     data->vrm_demand = false;
@@ -153,14 +155,14 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     if (!floor)
         floor = 1;
 
-    if (!data->vrm_valid)
-        interval = HZ / 4;
-    else if (demanded && data->vrm_read_gap < HZ)
-        interval = max_t(unsigned long, data->vrm_read_gap, floor);
-    else
-        interval = HZ;
+    last_read_set = data->vrm_last_read != 0;
+    gap = last_read_set ? now - data->vrm_last_read : 0;
+    age = data->vrm_last_updated ? now - data->vrm_last_updated : ~0UL;
+    if (demanded)
+        data->vrm_read_gap = gap;
 
-    if (data->vrm_last_updated && !time_after(now, data->vrm_last_updated + interval))
+    if (!nct_vrm_should_sample(data->vrm_valid, demanded, last_read_set, gap,
+            age, HZ, floor))
         return;
 
     addr = (u8)(vrm_addr & 0xff);
@@ -246,18 +248,18 @@ static void nct6687_update_vrm(struct nct6687_data* data)
 static struct nct6687_data* nct_vrm_touch_and_update(struct device* dev)
 {
     struct nct6687_data* data = dev_get_drvdata(dev);
-    unsigned long now = jiffies;
 
-    data->vrm_read_gap = data->vrm_last_read ? now - data->vrm_last_read : HZ;
-    data->vrm_last_read = now;
     data->vrm_demand = true;
     /* VRM sysfs must not go through nct6687_update_device: that refreshes
      * every fan/temp/volt channel under update_lock. HUD polling would
      * otherwise force a full EC scan ~1 Hz on top of the SMBus sample.
      * Background 1 Hz VRM still runs from the update_device hook when
      * other nct6687 attrs are read.
+     * Stamp last_read after should_sample so first-ever / idle demand sees
+     * last_read==0 or the real gap — not a synthetic HZ.
      */
     nct6687_update_vrm(data);
+    data->vrm_last_read = jiffies;
     return data;
 }
 
