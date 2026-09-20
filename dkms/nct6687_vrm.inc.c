@@ -56,10 +56,10 @@ static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
     data->vrm_vout_mode_valid[1] = false;
 }
 
-static void nct_vrm_bus_recover(struct nct6687_data* data)
+static int nct_vrm_bus_recover(struct nct6687_data* data)
 {
     nct_vrm_invalidate_smbus(data);
-    nct_vrm_recover(data);
+    return nct_vrm_recover(data);
 }
 
 /*
@@ -144,9 +144,9 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     /*
      * Rate-limit even when invalid: a wedged VR/mux must not be hammered at
      * hwmon poll rate. Background / non-VRM paths: 1 Hz. VRM sysfs demand:
-     * match inter-read gap down to ~20 ms. After failure: retry at ~4 Hz.
-     * First demand after idle (or first-ever) uses the 20 ms floor — not 1 Hz
-     * just because last_read is 0 or aged >= 1 s.
+     * match inter-read gap down to ~20 ms. After failure: nct_vrm_fail_interval
+     * (HZ/4, then HZ, 2*HZ, cap 8*HZ). First demand after idle (or first-ever)
+     * uses the 20 ms floor — not 1 Hz just because last_read is 0 or aged >= 1 s.
      */
     demanded = data->vrm_demand;
     data->vrm_demand = false;
@@ -177,7 +177,8 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         data->vrm_gt_valid = false;
         data->vrm_last_updated = jiffies;
         data->vrm_fail_count++;
-        nct_vrm_bus_recover(data);
+        if (nct_vrm_bus_recover(data))
+            pr_warn_ratelimited("nct6687: VRM recover failed\n");
         mutex_unlock(&data->EC_io_lock);
         return;
     }
@@ -187,14 +188,15 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         data->vrm_gt_valid = false;
         data->vrm_last_updated = jiffies;
         data->vrm_fail_count++;
-        nct_vrm_bus_recover(data);
+        if (nct_vrm_bus_recover(data))
+            pr_warn_ratelimited("nct6687: VRM recover failed\n");
+        /* One mux restore. Ignore write errors — no retry on a wedged window. */
         nct_vrm_esio_write(data, 0x61, cfg_save);
         nct_vrm_esio_write(data, 0x62, baud_save);
         mutex_unlock(&data->EC_io_lock);
         return;
     }
 
-    data->vrm_fail_count = 0;
     data->vrm_vout = vout_mv;
     data->vrm_vin = vin_mv;
     data->vrm_iout = iout_ma;
@@ -219,7 +221,8 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         if (nct_vrm_sample_page(data, addr, 1, &vout_mv, &vin_mv, &iout_ma,
                 &pout_uw, &temp_mc)) {
             data->vrm_gt_valid = false;
-            nct_vrm_bus_recover(data);
+            if (nct_vrm_bus_recover(data))
+                pr_warn_ratelimited("nct6687: VRM recover failed\n");
         } else {
             bool first = !data->vrm_gt_hist_init;
 
@@ -244,8 +247,17 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         nct_vrm_esio_write(data, 0x60, 0x00);
     }
 
-    nct_vrm_esio_write(data, 0x61, cfg_save);
-    nct_vrm_esio_write(data, 0x62, baud_save);
+    /* One mux restore. If it fails, drop the cache so fail-interval backoff
+     * applies — do not retry the write on a wedged window. Reset the fail
+     * count only after PAGE sample *and* mux restore succeed.
+     */
+    if (nct_vrm_esio_write(data, 0x61, cfg_save) || nct_vrm_esio_write(data, 0x62, baud_save)) {
+        data->vrm_valid = false;
+        data->vrm_gt_valid = false;
+        data->vrm_fail_count++;
+    } else {
+        data->vrm_fail_count = 0;
+    }
     mutex_unlock(&data->EC_io_lock);
 }
 

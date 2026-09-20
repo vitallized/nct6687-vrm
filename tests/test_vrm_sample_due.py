@@ -236,6 +236,7 @@ def test_kernel_calls_should_sample_and_does_not_synthesize_hz_gap() -> None:
     assert "vrm_last_read ? now - data->vrm_last_read : HZ" not in text
     assert "vrm_fail_count" in text
     assert "data->vrm_fail_count = 0" in text
+    assert "if (nct_vrm_bus_recover(data))" in text
 
 
 def _fail_interval(c_decode_bin: Path, fails: int, hz: int = HZ) -> int:

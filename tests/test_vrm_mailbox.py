@@ -223,10 +223,3 @@ def test_recover_stuck_page_is_ebusy(c_mailbox_bin: Path) -> None:
     rc, _, _ = parse_run(stdout)
     assert rc_proc == 1
     assert rc == -errno.EBUSY
-
-
-def test_recover_stuck_page_is_ebusy(c_mailbox_bin: Path) -> None:
-    rc_proc, stdout = run_mailbox(c_mailbox_bin, "--stuck-page", "recover")
-    rc, _, _ = parse_run(stdout)
-    assert rc_proc == 1
-    assert rc == -errno.EBUSY
