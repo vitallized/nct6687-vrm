@@ -14,7 +14,8 @@ Examples:
   sudo python3 nct6687_vrm.py --loop 1
 
 Safety: no address scan, no block reads. Refuses if nct6687.ko is loaded
-unless --force (shared A24–A26 window has no userspace lock).
+unless --force (one-shot only). --loop is refused while the module is
+loaded — even with --force — because /dev/port has no lock vs EC_io_lock.
 """
 
 from __future__ import annotations
@@ -493,6 +494,21 @@ def module_loaded(name: str) -> bool:
     return Path(f"/sys/module/{name}").is_dir()
 
 
+def userspace_guard(*, loaded: bool, force: bool, looping: bool) -> str | None:
+    """None = allow. Else a refusal line for stderr.
+
+    --force is a one-shot escape when nct6687.ko is loaded. Looping that
+    race against a live module (especially vrm=Y) is how you wedge the EC.
+    """
+    if not loaded:
+        return None
+    if looping:
+        return "Refusing: --loop while nct6687.ko is loaded (unlocked /dev/port vs EC_io_lock)"
+    if not force:
+        return "Refusing: nct6687.ko is loaded (shares eSIO base+4..+6)"
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--addr", type=lambda x: int(x, 0), default=DEFAULT_ADDR)
@@ -532,9 +548,15 @@ def main() -> int:
         print("Only ports 0/1 are safe on this board", file=sys.stderr)
         return 1
 
-    if module_loaded("nct6687") and not args.force:
-        print("Refusing: nct6687.ko is loaded (shares eSIO base+4..+6)", file=sys.stderr)
-        print("Unload it, or pass --force", file=sys.stderr)
+    block = userspace_guard(
+        loaded=module_loaded("nct6687"),
+        force=args.force,
+        looping=args.loop is not None,
+    )
+    if block:
+        print(block, file=sys.stderr)
+        if "nct6687.ko is loaded (shares" in block:
+            print("Unload it, or pass --force for a one-shot", file=sys.stderr)
         return 3
 
     base = args.base if args.base is not None else discover_base()
