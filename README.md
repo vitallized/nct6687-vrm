@@ -110,7 +110,7 @@ That copies **this checkout** into `/usr/local` (`SOURCE_REPO=` here). A dirty o
 | `/etc/pacman.d/hooks/nct6687-vrm-reinject.hook` | `pacman-hook/nct6687-vrm-reinject.hook` |
 | `/etc/modprobe.d/nct6687-vrm.conf` | `pacman-hook/nct6687-vrm.conf` (`options nct6687 vrm=1`) |
 
-The pre-upgrade hook deletes unowned overlay leftovers in every `/usr/src/nct6687d*` directory, including leftover trees that no longer have `nct6687.c`. That means the VRM include, sibling headers, `*.pre-vrm` backups, leftover `Kbuild`. Pacman can then extract newly packaged files. This is what blocked `nct6687d-dkms-git` when upstream started shipping `Kbuild`.
+The pre-upgrade hook deletes unowned overlay leftovers in every `/usr/src/nct6687d*` directory, including leftover trees that no longer have `nct6687.c`. That means the VRM include, sibling headers, `*.pre-vrm` backups, leftover `Kbuild`. Pacman can then extract newly packaged files. This is what blocked `nct6687d-dkms-git` when upstream started shipping `Kbuild`. Run `pre_transaction` only as that PreTransaction hook — alone it also strips the **live** overlay extras. `post_transaction` (or `--install`) puts them back.
 
 The post-upgrade hook rebuilds on disk. It does not unload the running module mid-transaction. Reboot or reload later to pick up the new build. If the splice patch no longer applies, the hook fails and leaves stock `nct6687`. If the splice applied and DKMS rebuild then exits, the hook returns 1 and **leaves the tree spliced**.
 
