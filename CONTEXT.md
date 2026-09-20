@@ -41,7 +41,7 @@ A VRM sysfs read (not a fan/temp attr). First demand after idle, or first-ever, 
 _Avoid_: 1 Hz as the HUD rate
 
 **upgrade persist**:
-Re-apply the DKMS splice after a distro `nct6687d` upgrade without unloading the live module.
+Re-apply the DKMS splice after a distro `nct6687d` upgrade without unloading the live module. `pre_transaction` is PreTransaction-only — alone it strips live overlay extras; `post_transaction` puts them back.
 _Avoid_: install path, --install re-splice
 
 **splice patch**:
