@@ -148,8 +148,17 @@ def _pacman_owned_files(pkg_prefix: str = "nct6687d-dkms") -> set[str]:
     return owned
 
 
-def src_dirs() -> list[Path]:
-    found = {Path(p).parent for p in glob.glob("/usr/src/nct6687d*/nct6687.c")}
+def src_dirs(globs: tuple[str, ...] | None = None) -> list[Path]:
+    """nct6687d* trees, including leftovers that no longer have nct6687.c."""
+    patterns = globs if globs is not None else ("/usr/src/nct6687d*",)
+    found: set[Path] = set()
+    for pattern in patterns:
+        for match in glob.glob(pattern):
+            p = Path(match)
+            if p.is_dir():
+                found.add(p)
+            elif p.is_file():
+                found.add(p.parent)
     return sorted(found)
 
 
