@@ -404,6 +404,9 @@ def inject(src: Path) -> None:
     if not bak.exists():
         shutil.copy2(src, bak)
         print("Backup:", bak)
+    elif bak.read_bytes() != src.read_bytes():
+        shutil.copy2(src, bak)
+        print("Replaced stale backup:", bak)
     stage_m_tree(pkg, text, pkg_dir=pkg)
     print("Patched", src)
 
