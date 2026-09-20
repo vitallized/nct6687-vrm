@@ -90,4 +90,31 @@ static long nct_vrm_iout_from_pv_ma(long p_mw, long v_mv)
 	return (p_mw * 1000L) / v_mv;
 }
 
+/* Software min/max. first=true seeds both ends. */
+static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
+{
+	if (first) {
+		*min = *max = val;
+		return;
+	}
+	if (val < *min)
+		*min = val;
+	if (val > *max)
+		*max = val;
+}
+
+/*
+ * IOUT (mA) and POUT (uW) use reject_neg: LINEAR11 can decode a signed spike
+ * (live: -13900 mA / -17000000 uW) and hist would latch it until reload.
+ * VOUT/VIN/TEMP keep reject_neg=false.
+ */
+static void nct_vrm_hist_add(long* min, long* max, bool* init, long val,
+	bool reject_neg)
+{
+	if (reject_neg && val < 0)
+		return;
+	nct_vrm_hist_point(min, max, val, !*init);
+	*init = true;
+}
+
 #endif
