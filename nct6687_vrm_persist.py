@@ -41,7 +41,7 @@ class PersistLayout:
     lib: Path = Path("/usr/local/lib/nct6687-vrm")
     hook_dir: Path = Path("/etc/pacman.d/hooks")
     modprobe_d: Path = Path("/etc/modprobe.d")
-    src_globs: tuple[str, ...] = field(default_factory=lambda: ("/usr/src/nct6687d*/nct6687.c",))
+    src_globs: tuple[str, ...] = field(default_factory=lambda: ("/usr/src/nct6687d*",))
 
 
 def source_repo(layout: PersistLayout) -> Path | None:
@@ -98,7 +98,9 @@ def pre_transaction(
     if not payload_installed(layout):
         print("persist: missing payload — skip pre-upgrade clear", file=sys.stderr)
         return 0
-    removed = inject.clear_unowned(pkg_dirs)
+    removed = inject.clear_unowned(
+        pkg_dirs if pkg_dirs is not None else inject.src_dirs(layout.src_globs)
+    )
     if not removed:
         print("No unowned files to remove")
     return 0
@@ -128,14 +130,18 @@ def post_transaction(
     except SystemExit as exc:
         print("persist: splice failed (driver layout changed?):", exc, file=sys.stderr)
         return 1
-    if rebuild is None:
-        inject.rebuild(
-            src,
-            reload=False,
-            load_vrm=inject.want_vrm_enabled(False),
-        )
-    else:
-        rebuild(src)
+    try:
+        if rebuild is None:
+            inject.rebuild(
+                src,
+                reload=False,
+                load_vrm=inject.want_vrm_enabled(False),
+            )
+        else:
+            rebuild(src)
+    except SystemExit as exc:
+        print("persist: rebuild failed (tree left spliced):", exc, file=sys.stderr)
+        return 1
     return 0
 
 
