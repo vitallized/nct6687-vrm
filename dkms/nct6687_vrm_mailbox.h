@@ -115,13 +115,17 @@ static int nct_vrm_esio_read(struct nct6687_data* data, u8 page, u8 index, u8* o
 static int nct_vrm_prep_clear(struct nct6687_data* data)
 {
 	u8 ctrl;
+	int rc;
 
-	if (nct_vrm_esio_write(data, 0x03, 0xff) || nct_vrm_esio_write(data, 0x04, 0xff)
-		|| nct_vrm_esio_read(data, 4, 0x60, &ctrl)
-		|| nct_vrm_esio_write(data, 0x60, (ctrl | NCT_VRM_SMB_CLEAR) & ~NCT_VRM_SMB_START)
-		|| nct_vrm_esio_write(data, 0x60, ctrl & ~(NCT_VRM_SMB_START | NCT_VRM_SMB_CLEAR)))
-		return -EIO;
-	return 0;
+	if ((rc = nct_vrm_esio_write(data, 0x03, 0xff)))
+		return rc;
+	if ((rc = nct_vrm_esio_write(data, 0x04, 0xff)))
+		return rc;
+	if ((rc = nct_vrm_esio_read(data, 4, 0x60, &ctrl)))
+		return rc;
+	if ((rc = nct_vrm_esio_write(data, 0x60, (ctrl | NCT_VRM_SMB_CLEAR) & ~NCT_VRM_SMB_START)))
+		return rc;
+	return nct_vrm_esio_write(data, 0x60, ctrl & ~(NCT_VRM_SMB_START | NCT_VRM_SMB_CLEAR));
 }
 
 static int nct_vrm_wait_start_clear(struct nct6687_data* data)
@@ -139,10 +143,13 @@ static int nct_vrm_wait_start_clear(struct nct6687_data* data)
 	return -ETIMEDOUT;
 }
 
-static void nct_vrm_recover(struct nct6687_data* data)
+static int nct_vrm_recover(struct nct6687_data* data)
 {
-	nct_vrm_prep_clear(data);
-	nct_vrm_esio_write(data, 0x60, 0x00);
+	int rc = nct_vrm_prep_clear(data);
+
+	if (rc)
+		return rc;
+	return nct_vrm_esio_write(data, 0x60, 0x00);
 }
 
 static int nct_vrm_write_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8 value)

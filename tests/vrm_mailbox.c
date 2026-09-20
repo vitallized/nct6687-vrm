@@ -225,10 +225,10 @@ int main(int argc, char** argv)
 		return rc ? 1 : 0;
 	}
 	if (!strcmp(fn, "recover") && argc - i == 0) {
-		nct_vrm_recover(&data);
-		printf("rc=0\n");
+		rc = nct_vrm_recover(&data);
+		printf("rc=%d\n", rc);
 		dump_log();
-		return 0;
+		return rc ? 1 : 0;
 	}
 	usage();
 	return 2;

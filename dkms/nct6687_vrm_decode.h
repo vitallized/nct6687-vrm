@@ -117,4 +117,49 @@ static void nct_vrm_hist_add(long* min, long* max, bool* init, long val,
 	*init = true;
 }
 
+/*
+ * Retry interval after consecutive PAGE-sample failures. First fail stays
+ * ~HZ/4; then HZ, 2*HZ, cap 8*HZ. fails==0 (never failed / just reset) uses
+ * the first-fail slot so a cold !valid cache still retries at HZ/4.
+ */
+static unsigned long nct_vrm_fail_interval(unsigned fails, unsigned long hz)
+{
+	if (fails <= 1)
+		return hz / 4;
+	if (fails == 2)
+		return hz;
+	if (fails == 3)
+		return 2 * hz;
+	return 8 * hz;
+}
+
+/*
+ * PAGE sample due? valid / demanded / last_read / gap / cache age in jiffies.
+ *
+ * Live (2026-09-20): 1.2 s idle then vrm_cpu in 0.11 ms (stale). First demand
+ * had gap>=HZ (aged last_read, or last_read==0 stored as HZ) so interval=HZ
+ * and a recent fan update_vrm won the rate-limit. Demand after idle / first
+ * read uses the 20 ms floor, not 1 Hz. Background stays 1 Hz; invalid uses
+ * nct_vrm_fail_interval even on demand.
+ */
+static bool nct_vrm_should_sample(bool valid, bool demanded, bool last_read_set,
+	unsigned long gap, unsigned long last_updated_age, unsigned long hz,
+	unsigned long floor, unsigned fails)
+{
+	unsigned long interval;
+
+	if (!valid)
+		interval = nct_vrm_fail_interval(fails, hz);
+	else if (!demanded)
+		interval = hz;
+	else if (!last_read_set || gap >= hz)
+		interval = floor;
+	else if (gap > floor)
+		interval = gap;
+	else
+		interval = floor;
+
+	return last_updated_age > interval;
+}
+
 #endif
