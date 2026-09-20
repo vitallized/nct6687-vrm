@@ -19,7 +19,8 @@ static void usage(void)
 		"       vrm_decode decode_vout_mv RAW VOUT_MODE FALLBACK_EXP\n"
 		"       vrm_decode decode_vin_mv RAW\n"
 		"       vrm_decode decode_iout_fallback_ma RAW\n"
-		"       vrm_decode iout_from_pv_ma P_MW V_MV\n");
+		"       vrm_decode iout_from_pv_ma P_MW V_MV\n"
+		"       vrm_decode hist_seq nonneg|always VAL...\n");
 }
 
 int main(int argc, char** argv)
@@ -59,6 +60,27 @@ int main(int argc, char** argv)
 		printf("%ld\n",
 			nct_vrm_iout_from_pv_ma(strtol(argv[2], NULL, 0),
 				strtol(argv[3], NULL, 0)));
+		return 0;
+	}
+	if (!strcmp(fn, "hist_seq") && argc >= 4) {
+		bool reject_neg;
+		bool init = false;
+		long mn = 0;
+		long mx = 0;
+		int i;
+
+		if (!strcmp(argv[2], "nonneg"))
+			reject_neg = true;
+		else if (!strcmp(argv[2], "always"))
+			reject_neg = false;
+		else {
+			usage();
+			return 2;
+		}
+		for (i = 3; i < argc; i++)
+			nct_vrm_hist_add(&mn, &mx, &init, strtol(argv[i], NULL, 0),
+				reject_neg);
+		printf("%d %ld %ld\n", init ? 1 : 0, mn, mx);
 		return 0;
 	}
 	usage();

@@ -41,7 +41,11 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_vout_mode_valid[0] = false;
     data->vrm_vout_mode_valid[1] = false;
     data->vrm_hist_init = false;
+    data->vrm_iout_hist_init = false;
+    data->vrm_pout_hist_init = false;
     data->vrm_gt_hist_init = false;
+    data->vrm_gt_iout_hist_init = false;
+    data->vrm_gt_pout_hist_init = false;
 }
 
 static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
@@ -125,19 +129,6 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
     return 0;
 }
 
-/* Software min/max per device (same idea as stock nct6687 voltage[1]/[2]). */
-static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
-{
-    if (first)
-        *min = *max = val;
-    else {
-        if (val < *min)
-            *min = val;
-        if (val > *max)
-            *max = val;
-    }
-}
-
 static void nct6687_update_vrm(struct nct6687_data* data)
 {
     u8 cfg_save, baud_save;
@@ -210,8 +201,10 @@ static void nct6687_update_vrm(struct nct6687_data* data)
 
         nct_vrm_hist_point(&data->vrm_vout_min, &data->vrm_vout_max, vout_mv, first);
         nct_vrm_hist_point(&data->vrm_vin_min, &data->vrm_vin_max, vin_mv, first);
-        nct_vrm_hist_point(&data->vrm_iout_min, &data->vrm_iout_max, iout_ma, first);
-        nct_vrm_hist_point(&data->vrm_pout_min, &data->vrm_pout_max, pout_uw, first);
+        nct_vrm_hist_add(&data->vrm_iout_min, &data->vrm_iout_max,
+            &data->vrm_iout_hist_init, iout_ma, true);
+        nct_vrm_hist_add(&data->vrm_pout_min, &data->vrm_pout_max,
+            &data->vrm_pout_hist_init, pout_uw, true);
         nct_vrm_hist_point(&data->vrm_temp_min, &data->vrm_temp_max, temp_mc, first);
         data->vrm_hist_init = true;
     }
@@ -232,8 +225,10 @@ static void nct6687_update_vrm(struct nct6687_data* data)
             data->vrm_gt_valid = true;
             nct_vrm_hist_point(&data->vrm_gt_vout_min, &data->vrm_gt_vout_max, vout_mv, first);
             nct_vrm_hist_point(&data->vrm_gt_vin_min, &data->vrm_gt_vin_max, vin_mv, first);
-            nct_vrm_hist_point(&data->vrm_gt_iout_min, &data->vrm_gt_iout_max, iout_ma, first);
-            nct_vrm_hist_point(&data->vrm_gt_pout_min, &data->vrm_gt_pout_max, pout_uw, first);
+            nct_vrm_hist_add(&data->vrm_gt_iout_min, &data->vrm_gt_iout_max,
+                &data->vrm_gt_iout_hist_init, iout_ma, true);
+            nct_vrm_hist_add(&data->vrm_gt_pout_min, &data->vrm_gt_pout_max,
+                &data->vrm_gt_pout_hist_init, pout_uw, true);
             nct_vrm_hist_point(&data->vrm_gt_temp_min, &data->vrm_gt_temp_max, temp_mc, first);
             data->vrm_gt_hist_init = true;
             nct_vrm_esio_write(data, 0x60, 0x00);
@@ -327,9 +322,9 @@ static const struct nct_vrm_chan nct_vrm_chans[] = {
     [NCT_VRM_CPU_VIN] = NCT_VRM_CHAN("VRM CPU VIN", 0,
         vrm_vin, vrm_vin_min, vrm_vin_max, vrm_hist_init),
     [NCT_VRM_CPU_IOUT] = NCT_VRM_CHAN("VRM CPU IOUT", 0,
-        vrm_iout, vrm_iout_min, vrm_iout_max, vrm_hist_init),
+        vrm_iout, vrm_iout_min, vrm_iout_max, vrm_iout_hist_init),
     [NCT_VRM_CPU_POUT] = NCT_VRM_CHAN("VRM CPU POUT", 0,
-        vrm_pout, vrm_pout_min, vrm_pout_max, vrm_hist_init),
+        vrm_pout, vrm_pout_min, vrm_pout_max, vrm_pout_hist_init),
     [NCT_VRM_CPU_TEMP] = NCT_VRM_CHAN("VRM CPU TEMP", 0,
         vrm_temp, vrm_temp_min, vrm_temp_max, vrm_hist_init),
     [NCT_VRM_GT_VOUT] = NCT_VRM_CHAN("VRM GT VOUT", NCT_VRM_F_GT,
@@ -337,9 +332,9 @@ static const struct nct_vrm_chan nct_vrm_chans[] = {
     [NCT_VRM_GT_VIN] = NCT_VRM_CHAN("VRM GT VIN", NCT_VRM_F_GT,
         vrm_gt_vin, vrm_gt_vin_min, vrm_gt_vin_max, vrm_gt_hist_init),
     [NCT_VRM_GT_IOUT] = NCT_VRM_CHAN("VRM GT IOUT", NCT_VRM_F_GT,
-        vrm_gt_iout, vrm_gt_iout_min, vrm_gt_iout_max, vrm_gt_hist_init),
+        vrm_gt_iout, vrm_gt_iout_min, vrm_gt_iout_max, vrm_gt_iout_hist_init),
     [NCT_VRM_GT_POUT] = NCT_VRM_CHAN("VRM GT POUT", NCT_VRM_F_GT,
-        vrm_gt_pout, vrm_gt_pout_min, vrm_gt_pout_max, vrm_gt_hist_init),
+        vrm_gt_pout, vrm_gt_pout_min, vrm_gt_pout_max, vrm_gt_pout_hist_init),
     [NCT_VRM_GT_TEMP] = NCT_VRM_CHAN("VRM GT TEMP", NCT_VRM_F_GT,
         vrm_gt_temp, vrm_gt_temp_min, vrm_gt_temp_max, vrm_gt_hist_init),
 };
