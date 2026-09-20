@@ -52,6 +52,22 @@ def test_refresh_updates_hooks(tmp_path: Path) -> None:
     assert "post_transaction" in stale.read_text()
 
 
+def test_refresh_updates_etc_hooks_when_present(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    persist.install(ROOT, layout)
+    stale = layout.hook_dir / "nct6687-vrm-reinject.hook"
+    stale.write_text("# stale etc hook\n")
+    assert persist.refresh(layout, ROOT) is True
+    assert stale.read_text() == (ROOT / "pacman-hook" / "nct6687-vrm-reinject.hook").read_text()
+
+
+def test_refresh_does_not_invent_etc_hooks(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    assert persist.refresh(layout, ROOT) is True
+    assert not (layout.hook_dir / "nct6687-vrm-reinject.hook").exists()
+    assert not (layout.hook_dir / "nct6687-vrm-preupgrade.hook").exists()
+
+
 def test_pre_transaction_clears_leftover_tree_without_c(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
