@@ -37,6 +37,7 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_last_updated = 0;
     data->vrm_last_read = 0;
     data->vrm_read_gap = 0;
+    data->vrm_fail_count = 0;
     data->vrm_smbus_page = -1;
     data->vrm_vout_mode_valid[0] = false;
     data->vrm_vout_mode_valid[1] = false;
@@ -162,7 +163,7 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         data->vrm_read_gap = gap;
 
     if (!nct_vrm_should_sample(data->vrm_valid, demanded, last_read_set, gap,
-            age, HZ, floor))
+            age, HZ, floor, data->vrm_fail_count))
         return;
 
     addr = (u8)(vrm_addr & 0xff);
@@ -175,6 +176,7 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         data->vrm_valid = false;
         data->vrm_gt_valid = false;
         data->vrm_last_updated = jiffies;
+        data->vrm_fail_count++;
         nct_vrm_bus_recover(data);
         mutex_unlock(&data->EC_io_lock);
         return;
@@ -184,6 +186,7 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         data->vrm_valid = false;
         data->vrm_gt_valid = false;
         data->vrm_last_updated = jiffies;
+        data->vrm_fail_count++;
         nct_vrm_bus_recover(data);
         nct_vrm_esio_write(data, 0x61, cfg_save);
         nct_vrm_esio_write(data, 0x62, baud_save);
@@ -191,6 +194,7 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         return;
     }
 
+    data->vrm_fail_count = 0;
     data->vrm_vout = vout_mv;
     data->vrm_vin = vin_mv;
     data->vrm_iout = iout_ma;

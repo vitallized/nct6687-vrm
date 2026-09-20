@@ -21,7 +21,8 @@ static void usage(void)
 		"       vrm_decode decode_iout_fallback_ma RAW\n"
 		"       vrm_decode iout_from_pv_ma P_MW V_MV\n"
 		"       vrm_decode hist_seq nonneg|always VAL...\n"
-		"       vrm_decode should_sample VALID DEMANDED LAST_READ_SET GAP AGE HZ FLOOR\n");
+		"       vrm_decode should_sample VALID DEMANDED LAST_READ_SET GAP AGE HZ FLOOR FAILS\n"
+		"       vrm_decode fail_interval FAILS HZ\n");
 }
 
 int main(int argc, char** argv)
@@ -84,7 +85,13 @@ int main(int argc, char** argv)
 		printf("%d %ld %ld\n", init ? 1 : 0, mn, mx);
 		return 0;
 	}
-	if (!strcmp(fn, "should_sample") && argc == 9) {
+	if (!strcmp(fn, "fail_interval") && argc == 4) {
+		printf("%lu\n",
+			nct_vrm_fail_interval((unsigned)strtoul(argv[2], NULL, 0),
+				strtoul(argv[3], NULL, 0)));
+		return 0;
+	}
+	if (!strcmp(fn, "should_sample") && argc == 10) {
 		bool sample = nct_vrm_should_sample(
 			!!strtol(argv[2], NULL, 0),
 			!!strtol(argv[3], NULL, 0),
@@ -92,7 +99,8 @@ int main(int argc, char** argv)
 			strtoul(argv[5], NULL, 0),
 			strtoul(argv[6], NULL, 0),
 			strtoul(argv[7], NULL, 0),
-			strtoul(argv[8], NULL, 0));
+			strtoul(argv[8], NULL, 0),
+			(unsigned)strtoul(argv[9], NULL, 0));
 
 		printf("%d\n", sample ? 1 : 0);
 		return 0;
