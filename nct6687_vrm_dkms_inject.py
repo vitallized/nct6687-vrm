@@ -404,6 +404,9 @@ def inject(src: Path) -> None:
     if not bak.exists():
         shutil.copy2(src, bak)
         print("Backup:", bak)
+    elif bak.read_bytes() != src.read_bytes():
+        shutil.copy2(src, bak)
+        print("Replaced stale backup:", bak)
     stage_m_tree(pkg, text, pkg_dir=pkg)
     print("Patched", src)
 
@@ -629,6 +632,26 @@ def want_vrm_enabled(cli_enable: bool) -> bool:
     return False
 
 
+def installed_source_repo() -> Path | None:
+    """Checkout from source.env. None if unset or not a directory — do not invent one."""
+    env = INSTALLED_LIB / "source.env"
+    if not env.is_file():
+        return None
+    for line in env.read_text().splitlines():
+        if line.startswith("SOURCE_REPO="):
+            repo = Path(line.split("=", 1)[1].strip())
+            return repo if repo.is_dir() else None
+    return None
+
+
+def _checkout_file(repo: Path, *relatives: str) -> Path | None:
+    for rel in relatives:
+        path = repo / rel
+        if path.is_file():
+            return path
+    return None
+
+
 def warn_if_hook_stale() -> None:
     installed = INSTALLED_LIB / Path(__file__).name
     here = Path(__file__).resolve()
@@ -674,22 +697,40 @@ def check() -> int:
     print("This script:", here)
     installed_py = INSTALLED_LIB / here.name
     stale = False
+    source = installed_source_repo()
     if installed_py.is_file():
-        py_stale = installed_py.read_bytes() != here.read_bytes()
-        stale = stale or py_stale
-        print("Installed hook copy:", "STALE" if py_stale else "ok")
+        py_truth = _checkout_file(source, here.name) if source is not None else here
+        if py_truth is None:
+            stale = True
+            print("Installed hook copy: STALE")
+        else:
+            py_stale = installed_py.read_bytes() != py_truth.read_bytes()
+            stale = stale or py_stale
+            print("Installed hook copy:", "STALE" if py_stale else "ok")
         for name in VRM_FILES:
             installed = INSTALLED_LIB / name
-            if installed.is_file():
-                file_stale = installed.read_bytes() != find_vrm_file(name).read_bytes()
-                stale = stale or file_stale
-                print(f"Installed {name}:", "STALE" if file_stale else "ok")
-            else:
+            if not installed.is_file():
                 stale = True
                 print(f"Installed {name}: missing")
+                continue
+            if source is not None:
+                truth = _checkout_file(source, f"dkms/{name}", name)
+                if truth is None:
+                    stale = True
+                    print(f"Installed {name}: STALE")
+                    continue
+                file_stale = installed.read_bytes() != truth.read_bytes()
+            else:
+                file_stale = installed.read_bytes() != find_vrm_file(name).read_bytes()
+            stale = stale or file_stale
+            print(f"Installed {name}:", "STALE" if file_stale else "ok")
         persist_py = INSTALLED_LIB / "nct6687_vrm_persist.py"
-        persist_src = REPO_ROOT / "nct6687_vrm_persist.py"
-        if persist_py.is_file() and persist_src.is_file():
+        persist_src = (
+            _checkout_file(source, "nct6687_vrm_persist.py")
+            if source is not None
+            else REPO_ROOT / "nct6687_vrm_persist.py"
+        )
+        if persist_py.is_file() and persist_src is not None and persist_src.is_file():
             p_stale = persist_py.read_bytes() != persist_src.read_bytes()
             stale = stale or p_stale
             print("Installed persist:", "STALE" if p_stale else "ok")
@@ -697,7 +738,12 @@ def check() -> int:
             stale = True
             print("Installed persist: missing")
         try:
-            patch_src = find_patch()
+            if source is not None:
+                patch_src = _checkout_file(source, f"patches/{PATCH_NAME}", PATCH_NAME)
+                if patch_src is None:
+                    raise SystemExit(f"Missing {PATCH_NAME} in SOURCE_REPO")
+            else:
+                patch_src = find_patch()
             patch_inst = INSTALLED_LIB / PATCH_NAME
             if patch_inst.is_file():
                 patch_stale = patch_inst.read_bytes() != patch_src.read_bytes()
