@@ -9,6 +9,7 @@
 	unsigned long vrm_last_updated;
 	unsigned long vrm_last_read;
 	unsigned long vrm_read_gap;
+	unsigned vrm_fail_count;
 	long vrm_vout; /* mV */
 	long vrm_vin;  /* mV */
 	long vrm_iout; /* mA */

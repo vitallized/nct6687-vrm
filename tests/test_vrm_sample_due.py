@@ -47,6 +47,7 @@ def _should_sample(
     last_updated_age: int,
     hz: int = HZ,
     floor: int = FLOOR,
+    fails: int = 0,
 ) -> bool:
     cmd = [
         str(c_decode_bin),
@@ -58,6 +59,7 @@ def _should_sample(
         str(last_updated_age),
         str(hz),
         str(floor),
+        str(fails),
     ]
     out = subprocess.check_output(cmd, text=True).strip()
     return out == "1"
@@ -117,6 +119,31 @@ def test_invalid_samples_after_hz_over_4(c_decode_bin: Path) -> None:
         last_read_set=0,
         gap=0,
         last_updated_age=251,
+    )
+
+
+def test_invalid_after_many_fails_skips_inside_8hz(c_decode_bin: Path) -> None:
+    # Four consecutive fails cap at 8*HZ=8000; 251 jiffies is the old HZ/4 fire.
+    assert not _should_sample(
+        c_decode_bin,
+        valid=0,
+        demanded=1,
+        last_read_set=0,
+        gap=0,
+        last_updated_age=251,
+        fails=4,
+    )
+
+
+def test_invalid_after_many_fails_samples_after_8hz(c_decode_bin: Path) -> None:
+    assert _should_sample(
+        c_decode_bin,
+        valid=0,
+        demanded=0,
+        last_read_set=0,
+        gap=0,
+        last_updated_age=8001,
+        fails=4,
     )
 
 
@@ -207,3 +234,32 @@ def test_kernel_calls_should_sample_and_does_not_synthesize_hz_gap() -> None:
     text = inc.read_text()
     assert "nct_vrm_should_sample(" in text
     assert "vrm_last_read ? now - data->vrm_last_read : HZ" not in text
+    assert "vrm_fail_count" in text
+    assert "data->vrm_fail_count = 0" in text
+
+
+def _fail_interval(c_decode_bin: Path, fails: int, hz: int = HZ) -> int:
+    out = subprocess.check_output(
+        [str(c_decode_bin), "fail_interval", str(fails), str(hz)],
+        text=True,
+    ).strip()
+    return int(out)
+
+
+def test_first_fail_interval_is_hz_over_4(c_decode_bin: Path) -> None:
+    # Independent literals: HZ=1000 → first retry still 250 jiffies (~HZ/4).
+    assert _fail_interval(c_decode_bin, 0) == 250
+    assert _fail_interval(c_decode_bin, 1) == 250
+
+
+def test_second_fail_interval_is_hz(c_decode_bin: Path) -> None:
+    assert _fail_interval(c_decode_bin, 2) == 1000
+
+
+def test_third_fail_interval_is_2hz(c_decode_bin: Path) -> None:
+    assert _fail_interval(c_decode_bin, 3) == 2000
+
+
+def test_fail_interval_caps_at_8hz(c_decode_bin: Path) -> None:
+    assert _fail_interval(c_decode_bin, 4) == 8000
+    assert _fail_interval(c_decode_bin, 99) == 8000
