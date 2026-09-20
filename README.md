@@ -140,7 +140,7 @@ sudo rm -rf /usr/local/lib/nct6687-vrm
 
 ## Userspace reader (optional)
 
-One-shot debug without patching the kernel. Prefer `nct6687` unloaded. `--force` races the driver's EC window. Fine for a quick check. Do not loop it.
+One-shot debug without patching the kernel. Prefer `nct6687` unloaded. `--force` races the driver's EC window for a single sample. `--loop` is refused while the module is loaded, even with `--force`.
 
 ```sh
 sudo python3 ./nct6687_vrm.py --page 0
