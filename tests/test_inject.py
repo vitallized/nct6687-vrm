@@ -150,6 +150,46 @@ def test_rebuild_skips_running_kernel_without_headers(tmp_path: Path) -> None:
     assert inject.rebuild_skip_reason("7.2.4-new", "7.2.3-old", have) is None
 
 
+def test_inject_replaces_stale_prevrm_when_stock_has_no_marker(
+    snippet: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = tmp_path / "nct6687.c"
+    bak = tmp_path / "nct6687.c.pre-vrm"
+    src.write_text(snippet)
+    bak.write_text("old package stock\n")
+    monkeypatch.setattr(inject, "find_patch", lambda: snippet_patch(tmp_path, snippet))
+    inject.inject(src)
+    assert bak.read_text() == snippet
+    assert src.read_text() == inject.inject_text(snippet)
+    assert "Replaced stale backup" in capsys.readouterr().out
+
+
+def test_inject_keeps_matching_prevrm_when_stock_has_no_marker(
+    snippet: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "nct6687.c"
+    bak = tmp_path / "nct6687.c.pre-vrm"
+    src.write_text(snippet)
+    bak.write_text(snippet)
+    monkeypatch.setattr(inject, "find_patch", lambda: snippet_patch(tmp_path, snippet))
+    inject.inject(src)
+    assert bak.read_text() == snippet
+    assert src.read_text() == inject.inject_text(snippet)
+
+
+def test_inject_marker_present_reinjects_from_bak_without_replacing_it(
+    snippet: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "nct6687.c"
+    bak = tmp_path / "nct6687.c.pre-vrm"
+    src.write_text(inject.inject_text(snippet))
+    bak.write_text(snippet)
+    monkeypatch.setattr(inject, "find_patch", lambda: snippet_patch(tmp_path, snippet))
+    inject.inject(src)
+    assert bak.read_text() == snippet
+    assert src.read_text() == inject.inject_text(snippet)
+
+
 def test_re_inject_from_stock_restores_data_include(snippet: str, tmp_path: Path) -> None:
     """--install used to copy a new include onto an old spliced nct6687.c."""
     stock = tmp_path / "nct6687.c"
