@@ -23,6 +23,8 @@
 	u8 vrm_vout_mode_cache[2];
 	bool vrm_vout_mode_valid[2];
 	bool vrm_hist_init;
+	bool vrm_iout_hist_init;
+	bool vrm_pout_hist_init;
 	long vrm_vout_min;
 	long vrm_vout_max;
 	long vrm_vin_min;
@@ -34,6 +36,8 @@
 	long vrm_temp_min;
 	long vrm_temp_max;
 	bool vrm_gt_hist_init;
+	bool vrm_gt_iout_hist_init;
+	bool vrm_gt_pout_hist_init;
 	long vrm_gt_vout_min;
 	long vrm_gt_vout_max;
 	long vrm_gt_vin_min;
