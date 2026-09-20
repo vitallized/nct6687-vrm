@@ -121,6 +121,18 @@ def test_kernels_for_rebuild_unions_header_only_kernels() -> None:
     ) == ["6.12.0-current", "6.13.0-new"]
 
 
+def test_src_dirs_finds_leftover_tree_without_nct6687_c(tmp_path: Path) -> None:
+    src_root = tmp_path / "usr" / "src"
+    leftover = src_root / "nct6687d-dkms-git-r88"
+    leftover.mkdir(parents=True)
+    (leftover / inject.INC_NAME).write_text("stale\n")
+    live = src_root / "nct6687d-dkms-git-r99"
+    live.mkdir()
+    (live / "nct6687.c").write_text("stock\n")
+    found = inject.src_dirs((str(src_root / "nct6687d*"),))
+    assert found == [leftover, live]
+
+
 def test_modules_with_headers_lists_build_dirs(tmp_path: Path) -> None:
     (tmp_path / "6.12.0" / "build").mkdir(parents=True)
     (tmp_path / "6.13.0" / "not-build").mkdir(parents=True)
