@@ -1,15 +1,6 @@
 --- a/nct6687.c
 +++ b/nct6687.c
-@@ -192,7 +192,7 @@
-  */
- 
- #define IOREGION_OFFSET 0 /* Use EC port 1 */
--#define IOREGION_LENGTH 4
-+#define IOREGION_LENGTH 8
- 
- /* Common and NCT6687 specific data */
- 
-@@ -642,7 +642,9 @@
+@@ -657,9 +657,12 @@
  	enum kinds kind;
  
  	struct device *dev;
@@ -19,8 +10,39 @@
 +#include "nct6687_vrm_data.h"
  
  	struct mutex update_lock;	/* used to protect sensor updates */
- 	struct mutex EC_io_lock;	/* used to protect EC io */
-@@ -911,6 +913,12 @@
++	struct mutex EC_io_lock;	/* page/index/data; VRM and read/write */
+ 	bool valid;					/* true if following fields are valid */
+ 	unsigned long last_updated; /* In jiffies */
+ 
+@@ -717,11 +720,13 @@
+ 	u8 index = (u8)(address & 0xFF);
+ 	int res;
+ 
++	/* r257 dropped EC_io_lock. VRM shares this window outside update_lock. */
++	mutex_lock(&data->EC_io_lock);
+ 	outb_p(EC_SPACE_PAGE_SELECT, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+ 	outb_p(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+ 	outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
+-
+ 	res = inb_p(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
++	mutex_unlock(&data->EC_io_lock);
+ 
+ 	return res;
+ }
+@@ -736,10 +741,12 @@
+ 	u8 page = (u8)(address >> 8);
+ 	u8 index = (u8)(address & 0xFF);
+ 
++	mutex_lock(&data->EC_io_lock);
+ 	outb_p(EC_SPACE_PAGE_SELECT, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+ 	outb_p(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+ 	outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
+ 	outb_p(value, data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
++	mutex_unlock(&data->EC_io_lock);
+ }
+ 
+ /*
+@@ -906,6 +913,12 @@
  	}
  }
  
@@ -33,7 +55,7 @@
  static struct nct6687_data *nct6687_update_device(struct device *dev)
  {
  	struct nct6687_data *data = dev_get_drvdata(dev);
-@@ -932,6 +940,9 @@
+@@ -927,6 +940,9 @@
  	}
  
  	mutex_unlock(&data->update_lock);
@@ -43,7 +65,15 @@
  
  	return data;
  }
-@@ -1749,8 +1760,22 @@
+@@ -1706,6 +1722,7 @@
+ 		 data->sioreg);
+ 
+ 	mutex_init(&data->update_lock);
++	mutex_init(&data->EC_io_lock);
+ 	mutex_init(&data->fan_watchdog_lock);
+ 	INIT_DELAYED_WORK(&data->fan_watchdog_work, nct6687_fan_watchdog_work);
+ 	platform_set_drvdata(pdev, data);
+@@ -1721,8 +1738,22 @@
  	nct6687_setup_temperatures(data);
  	nct6687_setup_voltages(data);
  

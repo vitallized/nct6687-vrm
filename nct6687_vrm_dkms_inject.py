@@ -312,13 +312,106 @@ def _require_anchor(text: str, needle: str, name: str, hint: str = "") -> None:
         raise SystemExit(f"anchor {name} not found{extra}")
 
 
+# r257 nct6687_read/write bodies. Restored lock wraps these exact sequences.
+_EC_READ_OLD = """\
+	int res;
+
+	outb_p(EC_SPACE_PAGE_SELECT, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+	outb_p(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+	outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
+
+	res = inb_p(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
+
+	return res;
+"""
+
+_EC_READ_NEW = """\
+	int res;
+
+	/* r257 dropped EC_io_lock. VRM shares this window outside update_lock. */
+	mutex_lock(&data->EC_io_lock);
+	outb_p(EC_SPACE_PAGE_SELECT, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+	outb_p(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+	outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
+	res = inb_p(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
+	mutex_unlock(&data->EC_io_lock);
+
+	return res;
+"""
+
+_EC_WRITE_OLD = """\
+	u8 index = (u8)(address & 0xFF);
+
+	outb_p(EC_SPACE_PAGE_SELECT, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+	outb_p(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+	outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
+	outb_p(value, data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
+}
+"""
+
+_EC_WRITE_NEW = """\
+	u8 index = (u8)(address & 0xFF);
+
+	mutex_lock(&data->EC_io_lock);
+	outb_p(EC_SPACE_PAGE_SELECT, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+	outb_p(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
+	outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
+	outb_p(value, data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
+	mutex_unlock(&data->EC_io_lock);
+}
+"""
+
+_READ_SIG = "static u16 nct6687_read(struct nct6687_data *data, u16 address)"
+
+
+def _widen_ioregion_if_needed(text: str) -> str:
+    """Length 8 only for the old offset-0 claim (BAR+0..+3, EC window at +4).
+
+    r257 sets IOREGION_OFFSET to 4 and EC_SPACE_* to 0/1/2, so length 4
+    already covers page/index/data. Widening that would claim four extra ports.
+    """
+    length4 = "#define IOREGION_LENGTH 4"
+    _require_anchor(text, length4, "IOREGION_LENGTH 4")
+    if "#define IOREGION_OFFSET 4" in text:
+        return text
+    if "#define IOREGION_OFFSET 0" in text or "#define IOREGION_OFFSET" not in text:
+        return text.replace(length4, "#define IOREGION_LENGTH 8", 1)
+    raise SystemExit("anchor IOREGION_OFFSET unrecognized — driver layout changed")
+
+
+def _restore_ec_io_lock(text: str) -> str:
+    """Put EC_io_lock back when upstream removed it (nct6687d r257).
+
+    Older trees already lock nct6687_read/write. The fixture has no read
+    function, so it skips this. A driver that still has the read signature
+    but a different body fails the anchor instead of compiling a racy module.
+    """
+    if "struct mutex EC_io_lock" in text or _READ_SIG not in text:
+        return text
+    _require_anchor(text, _EC_READ_OLD, "nct6687_read body")
+    _require_anchor(text, _EC_WRITE_OLD, "nct6687_write body")
+    init = "\tmutex_init(&data->update_lock);\n"
+    _require_anchor(text, init, "mutex_init update_lock")
+    if text.count(init) != 1:
+        raise SystemExit("anchor mutex_init update_lock is not unique")
+    if text.count(_EC_READ_OLD) != 1 or text.count(_EC_WRITE_OLD) != 1:
+        raise SystemExit("EC read/write body is not unique — driver layout changed")
+    text = text.replace(_EC_READ_OLD, _EC_READ_NEW, 1)
+    text = text.replace(_EC_WRITE_OLD, _EC_WRITE_NEW, 1)
+    text = text.replace(init, init + "\tmutex_init(&data->EC_io_lock);\n", 1)
+    needle = "\tstruct mutex update_lock;"
+    idx = text.find(needle)
+    eol = text.find("\n", idx)
+    member = "\tstruct mutex EC_io_lock;\t/* page/index/data; VRM and read/write */\n"
+    return text[: eol + 1] + member + text[eol + 1 :]
+
+
 def inject_text(text: str) -> str:
     if MARKER in text:
         raise SystemExit("Already injected (marker present)")
 
-    ioregion = "#define IOREGION_LENGTH 4"
-    _require_anchor(text, ioregion, "IOREGION_LENGTH 4")
-    text = text.replace(ioregion, "#define IOREGION_LENGTH 8", 1)
+    text = _widen_ioregion_if_needed(text)
+    text = _restore_ec_io_lock(text)
 
     needle = "\tstruct mutex update_lock;"
     _require_anchor(text, needle, "struct mutex update_lock")

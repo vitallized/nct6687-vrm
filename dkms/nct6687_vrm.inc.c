@@ -8,6 +8,7 @@
  * Default OFF. update_vrm runs AFTER update_lock is released (adaptive cache:
  * 1 Hz background; match VRM sysfs poll rate down to ~20 ms when demanded)
  * and holds only EC_io_lock — same lock as nct6687_read/write.
+ * r257 dropped that mutex; the splice puts it back around those helpers.
  */
 static bool vrm;
 module_param(vrm, bool, 0444);
