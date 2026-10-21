@@ -82,6 +82,32 @@ def test_ioregion_length_grows_to_eight(snippet: str) -> None:
     assert "#define IOREGION_LENGTH 8" in out
 
 
+def test_offset4_keeps_length_and_restores_ec_lock(snippet: str) -> None:
+    """nct6687d r257: OFFSET 4 already covers the EC window, and EC_io_lock is gone."""
+    src = snippet.replace(
+        "#define IOREGION_LENGTH 4",
+        "#define IOREGION_OFFSET 4 /* Use EC port 1 */\n#define IOREGION_LENGTH 4",
+        1,
+    )
+    src += (
+        "\n"
+        + inject._READ_SIG
+        + "\n{\n\tu8 page = (u8)(address >> 8);\n\tu8 index = (u8)(address & 0xFF);\n"
+        + inject._EC_READ_OLD
+        + "}\n\nstatic void nct6687_write(struct nct6687_data *data, u16 address, u16 value)\n"
+        + "{\n\tu8 page = (u8)(address >> 8);\n"
+        + inject._EC_WRITE_OLD
+        + "\nstatic void nct6687_probe_locks(void)\n{\n\tmutex_init(&data->update_lock);\n}\n"
+    )
+    out = inject.inject_text(src)
+    assert "#define IOREGION_LENGTH 8" not in out
+    assert "#define IOREGION_LENGTH 4" in out
+    assert "struct mutex EC_io_lock" in out
+    assert "mutex_init(&data->EC_io_lock);" in out
+    assert out.count("mutex_lock(&data->EC_io_lock);") == 2
+    assert out.count("mutex_unlock(&data->EC_io_lock);") == 2
+
+
 def test_vrm_include_spliced(snippet: str) -> None:
     out = inject.inject_text(snippet)
     assert f'#include "{inject.INC_NAME}"' in out
