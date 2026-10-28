@@ -32,8 +32,6 @@ MODULE_PARM_DESC(vrm_vout_exp, "Fallback LINEAR16 exp if VOUT_MODE unknown (-16.
 static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
 {
     data->vrm_enabled = enabled;
-    data->vrm_valid = false;
-    data->vrm_gt_valid = false;
     data->vrm_demand = false;
     data->vrm_last_updated = 0;
     data->vrm_last_read = 0;
@@ -42,19 +40,7 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_smbus_page = -1;
     data->vrm_vout_mode_valid[0] = false;
     data->vrm_vout_mode_valid[1] = false;
-    data->vrm_hist_init = false;
-    data->vrm_iout_hist_init = false;
-    data->vrm_pout_hist_init = false;
-    data->vrm_gt_hist_init = false;
-    data->vrm_gt_iout_hist_init = false;
-    data->vrm_gt_pout_hist_init = false;
-}
-
-static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
-{
-    data->vrm_smbus_page = -1;
-    data->vrm_vout_mode_valid[0] = false;
-    data->vrm_vout_mode_valid[1] = false;
+    memset(data->vrm_rail, 0, sizeof(data->vrm_rail));
 }
 
 static void nct_vrm_bus_recover(struct nct6687_data* data)
@@ -63,79 +49,13 @@ static void nct_vrm_bus_recover(struct nct6687_data* data)
     nct_vrm_recover(data);
 }
 
-/*
- * Production PAGE sample — source of truth for userspace read_vrm:
- *   PAGE write+readback (cache miss), VOUT_MODE 0x20 (cached),
- *   then VOUT 0x8B, POUT 0x96, VIN 0x88, TEMP 0x8D.
- *   IOUT 0x8C only when decoded VOUT <= 200 mV; otherwise IOUT = P/V.
- *   CAP 0x19 / STATUS 0x78 are not on this path (debug-only in userspace).
- */
-static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
-    long* vout_mv, long* vin_mv, long* iout_ma,
-    long* pout_uw, long* temp_mc)
-{
-    u16 vout, iout = 0, pout, vin, temp;
-    u8 vout_mode, page_r;
-    long v_mv, p_mw, t_mc, i_ma;
-
-    if (page > 1)
-        return -EINVAL;
-
-    if (data->vrm_smbus_page != page) {
-        if (nct_vrm_write_byte(data, addr, 0x00, page) || nct_vrm_read_byte(data, addr, 0x00, &page_r)) {
-            nct_vrm_invalidate_smbus(data);
-            return -EIO;
-        }
-        if (page_r != page) {
-            nct_vrm_invalidate_smbus(data);
-            return -EIO;
-        }
-        data->vrm_smbus_page = page;
-    }
-
-    if (!data->vrm_vout_mode_valid[page]) {
-        if (nct_vrm_read_byte(data, addr, 0x20, &vout_mode)) {
-            nct_vrm_invalidate_smbus(data);
-            return -EIO;
-        }
-        data->vrm_vout_mode_cache[page] = vout_mode;
-        data->vrm_vout_mode_valid[page] = true;
-    } else {
-        vout_mode = data->vrm_vout_mode_cache[page];
-    }
-
-    /* VOUT, POUT, VIN, TEMP — skip IOUT unless P/V is unusable. */
-    if (nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8d, &temp)) {
-        nct_vrm_invalidate_smbus(data);
-        return -EIO;
-    }
-
-    v_mv = nct_vrm_decode_vout_mv(vout, vout_mode, vrm_vout_exp);
-    p_mw = nct_vrm_linear11_milli(pout);
-    t_mc = nct_vrm_linear11_milli(temp);
-    if (v_mv > 200) {
-        i_ma = nct_vrm_iout_from_pv_ma(p_mw, v_mv);
-    } else {
-        if (nct_vrm_read_word(data, addr, 0x8c, &iout)) {
-            nct_vrm_invalidate_smbus(data);
-            return -EIO;
-        }
-        i_ma = nct_vrm_decode_iout_fallback_ma(iout);
-    }
-
-    *vout_mv = v_mv;
-    *vin_mv = nct_vrm_decode_vin_mv(vin);
-    *iout_ma = i_ma;
-    *pout_uw = p_mw * 1000L;
-    *temp_mc = t_mc;
-    return 0;
-}
-
 static void nct6687_update_vrm(struct nct6687_data* data)
 {
+    struct nct_vrm_rail* cpu = &data->vrm_rail[0];
+    struct nct_vrm_rail* gt = &data->vrm_rail[1];
     u8 cfg_save, baud_save;
     u8 addr;
-    long vout_mv, vin_mv, iout_ma, pout_uw, temp_mc;
+    long sample[NCT_VRM_NMETRIC];
     unsigned long now, floor, gap, age;
     bool demanded, last_read_set;
 
@@ -163,7 +83,7 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     if (demanded)
         data->vrm_read_gap = gap;
 
-    if (!nct_vrm_should_sample(data->vrm_valid, demanded, last_read_set, gap,
+    if (!nct_vrm_should_sample(cpu->valid, demanded, last_read_set, gap,
             age, HZ, floor, data->vrm_fail_count))
         return;
 
@@ -174,8 +94,8 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     mutex_lock(&data->EC_io_lock);
 
     if (nct_vrm_esio_read(data, 4, 0x61, &cfg_save) || nct_vrm_esio_read(data, 4, 0x62, &baud_save)) {
-        data->vrm_valid = false;
-        data->vrm_gt_valid = false;
+        cpu->valid = false;
+        gt->valid = false;
         data->vrm_last_updated = jiffies;
         data->vrm_fail_count++;
         nct_vrm_bus_recover(data);
@@ -183,9 +103,9 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         return;
     }
 
-    if (nct_vrm_esio_write(data, 0x61, (cfg_save & ~0x03) | 0x00) || nct_vrm_esio_write(data, 0x62, 0x03) || nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN) || nct_vrm_sample_page(data, addr, 0, &vout_mv, &vin_mv, &iout_ma, &pout_uw, &temp_mc)) {
-        data->vrm_valid = false;
-        data->vrm_gt_valid = false;
+    if (nct_vrm_esio_write(data, 0x61, (cfg_save & ~0x03) | 0x00) || nct_vrm_esio_write(data, 0x62, 0x03) || nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN) || nct_vrm_sample_page(data, addr, 0, vrm_vout_exp, sample)) {
+        cpu->valid = false;
+        gt->valid = false;
         data->vrm_last_updated = jiffies;
         data->vrm_fail_count++;
         nct_vrm_bus_recover(data);
@@ -196,52 +116,20 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     }
 
     data->vrm_fail_count = 0;
-    data->vrm_vout = vout_mv;
-    data->vrm_vin = vin_mv;
-    data->vrm_iout = iout_ma;
-    data->vrm_pout = pout_uw;
-    data->vrm_temp = temp_mc;
-    data->vrm_valid = true;
+    nct_vrm_rail_apply(cpu, sample);
     data->vrm_last_updated = jiffies;
-    {
-        bool first = !data->vrm_hist_init;
 
-        nct_vrm_hist_point(&data->vrm_vout_min, &data->vrm_vout_max, vout_mv, first);
-        nct_vrm_hist_point(&data->vrm_vin_min, &data->vrm_vin_max, vin_mv, first);
-        nct_vrm_hist_add(&data->vrm_iout_min, &data->vrm_iout_max,
-            &data->vrm_iout_hist_init, iout_ma, true);
-        nct_vrm_hist_add(&data->vrm_pout_min, &data->vrm_pout_max,
-            &data->vrm_pout_hist_init, pout_uw, true);
-        nct_vrm_hist_point(&data->vrm_temp_min, &data->vrm_temp_max, temp_mc, first);
-        data->vrm_hist_init = true;
-    }
-
+    /* GT failure after a good CPU sample keeps CPU valid. */
     if (vrm_gt) {
-        if (nct_vrm_sample_page(data, addr, 1, &vout_mv, &vin_mv, &iout_ma,
-                &pout_uw, &temp_mc)) {
-            data->vrm_gt_valid = false;
+        if (nct_vrm_sample_page(data, addr, 1, vrm_vout_exp, sample)) {
+            gt->valid = false;
             nct_vrm_bus_recover(data);
         } else {
-            bool first = !data->vrm_gt_hist_init;
-
-            data->vrm_gt_vout = vout_mv;
-            data->vrm_gt_vin = vin_mv;
-            data->vrm_gt_iout = iout_ma;
-            data->vrm_gt_pout = pout_uw;
-            data->vrm_gt_temp = temp_mc;
-            data->vrm_gt_valid = true;
-            nct_vrm_hist_point(&data->vrm_gt_vout_min, &data->vrm_gt_vout_max, vout_mv, first);
-            nct_vrm_hist_point(&data->vrm_gt_vin_min, &data->vrm_gt_vin_max, vin_mv, first);
-            nct_vrm_hist_add(&data->vrm_gt_iout_min, &data->vrm_gt_iout_max,
-                &data->vrm_gt_iout_hist_init, iout_ma, true);
-            nct_vrm_hist_add(&data->vrm_gt_pout_min, &data->vrm_gt_pout_max,
-                &data->vrm_gt_pout_hist_init, pout_uw, true);
-            nct_vrm_hist_point(&data->vrm_gt_temp_min, &data->vrm_gt_temp_max, temp_mc, first);
-            data->vrm_gt_hist_init = true;
+            nct_vrm_rail_apply(gt, sample);
             nct_vrm_esio_write(data, 0x60, 0x00);
         }
     } else {
-        data->vrm_gt_valid = false;
+        gt->valid = false;
         nct_vrm_esio_write(data, 0x60, 0x00);
     }
 
@@ -271,19 +159,19 @@ static struct nct6687_data* nct_vrm_touch_and_update(struct device* dev)
 static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, char* buf)
 {
     struct nct6687_data* data = nct_vrm_touch_and_update(dev);
+    const struct nct_vrm_rail* cpu = &data->vrm_rail[0];
 
-    if (!data->vrm_valid)
+    if (!cpu->valid)
         return -ENODATA;
-    return sprintf(buf, "%ld %ld %ld\n", data->vrm_vout, data->vrm_iout, data->vrm_pout);
+    return sprintf(buf, "%ld %ld %ld\n", cpu->val[NCT_VRM_VOUT],
+        cpu->val[NCT_VRM_IOUT], cpu->val[NCT_VRM_POUT]);
 }
 
 /*
- * One row per hwmon channel. nct_vrm_show / is_visible key off
- * SENSOR_DEVICE_ATTR_2 nr=channel, index=stat. Labels live here so adding a
- * rail is a table row plus the attr declarations — not a new show function.
+ * One row per hwmon channel: (PAGE, metric) into data->vrm_rail.
+ * nct_vrm_show / is_visible key off SENSOR_DEVICE_ATTR_2 nr=channel,
+ * index=stat. PAGE 1 rows are hidden unless vrm_gt.
  */
-#define NCT_VRM_F_GT 1
-
 enum nct_vrm_stat {
     NCT_VRM_INPUT,
     NCT_VRM_MIN,
@@ -306,53 +194,30 @@ enum nct_vrm_ch {
 
 struct nct_vrm_chan {
     const char* label;
-    u8 flags;
-    u16 value_off;
-    u16 min_off;
-    u16 max_off;
-    u16 hist_init_off;
+    u8 page;
+    u8 metric; /* enum nct_vrm_metric */
 };
 
-#define NCT_VRM_CHAN(_label, _flags, _field, _min, _max, _init) \
-    { \
-        .label = (_label), \
-        .flags = (_flags), \
-        .value_off = offsetof(struct nct6687_data, _field), \
-        .min_off = offsetof(struct nct6687_data, _min), \
-        .max_off = offsetof(struct nct6687_data, _max), \
-        .hist_init_off = offsetof(struct nct6687_data, _init), \
-    }
-
 static const struct nct_vrm_chan nct_vrm_chans[] = {
-    [NCT_VRM_CPU_VOUT] = NCT_VRM_CHAN("VRM CPU VOUT", 0,
-        vrm_vout, vrm_vout_min, vrm_vout_max, vrm_hist_init),
-    [NCT_VRM_CPU_VIN] = NCT_VRM_CHAN("VRM CPU VIN", 0,
-        vrm_vin, vrm_vin_min, vrm_vin_max, vrm_hist_init),
-    [NCT_VRM_CPU_IOUT] = NCT_VRM_CHAN("VRM CPU IOUT", 0,
-        vrm_iout, vrm_iout_min, vrm_iout_max, vrm_iout_hist_init),
-    [NCT_VRM_CPU_POUT] = NCT_VRM_CHAN("VRM CPU POUT", 0,
-        vrm_pout, vrm_pout_min, vrm_pout_max, vrm_pout_hist_init),
-    [NCT_VRM_CPU_TEMP] = NCT_VRM_CHAN("VRM CPU TEMP", 0,
-        vrm_temp, vrm_temp_min, vrm_temp_max, vrm_hist_init),
-    [NCT_VRM_GT_VOUT] = NCT_VRM_CHAN("VRM GT VOUT", NCT_VRM_F_GT,
-        vrm_gt_vout, vrm_gt_vout_min, vrm_gt_vout_max, vrm_gt_hist_init),
-    [NCT_VRM_GT_VIN] = NCT_VRM_CHAN("VRM GT VIN", NCT_VRM_F_GT,
-        vrm_gt_vin, vrm_gt_vin_min, vrm_gt_vin_max, vrm_gt_hist_init),
-    [NCT_VRM_GT_IOUT] = NCT_VRM_CHAN("VRM GT IOUT", NCT_VRM_F_GT,
-        vrm_gt_iout, vrm_gt_iout_min, vrm_gt_iout_max, vrm_gt_iout_hist_init),
-    [NCT_VRM_GT_POUT] = NCT_VRM_CHAN("VRM GT POUT", NCT_VRM_F_GT,
-        vrm_gt_pout, vrm_gt_pout_min, vrm_gt_pout_max, vrm_gt_pout_hist_init),
-    [NCT_VRM_GT_TEMP] = NCT_VRM_CHAN("VRM GT TEMP", NCT_VRM_F_GT,
-        vrm_gt_temp, vrm_gt_temp_min, vrm_gt_temp_max, vrm_gt_hist_init),
+    [NCT_VRM_CPU_VOUT] = { "VRM CPU VOUT", 0, NCT_VRM_VOUT },
+    [NCT_VRM_CPU_VIN] = { "VRM CPU VIN", 0, NCT_VRM_VIN },
+    [NCT_VRM_CPU_IOUT] = { "VRM CPU IOUT", 0, NCT_VRM_IOUT },
+    [NCT_VRM_CPU_POUT] = { "VRM CPU POUT", 0, NCT_VRM_POUT },
+    [NCT_VRM_CPU_TEMP] = { "VRM CPU TEMP", 0, NCT_VRM_TEMP },
+    [NCT_VRM_GT_VOUT] = { "VRM GT VOUT", 1, NCT_VRM_VOUT },
+    [NCT_VRM_GT_VIN] = { "VRM GT VIN", 1, NCT_VRM_VIN },
+    [NCT_VRM_GT_IOUT] = { "VRM GT IOUT", 1, NCT_VRM_IOUT },
+    [NCT_VRM_GT_POUT] = { "VRM GT POUT", 1, NCT_VRM_POUT },
+    [NCT_VRM_GT_TEMP] = { "VRM GT TEMP", 1, NCT_VRM_TEMP },
 };
 
 static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, char* buf)
 {
     struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
     const struct nct_vrm_chan* ch;
+    const struct nct_vrm_rail* r;
     struct nct6687_data* data;
     long val;
-    bool valid;
 
     if (sattr->nr >= ARRAY_SIZE(nct_vrm_chans))
         return -EINVAL;
@@ -362,23 +227,23 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
         return sprintf(buf, "%s\n", ch->label);
 
     data = nct_vrm_touch_and_update(dev);
+    r = &data->vrm_rail[ch->page];
 
     switch (sattr->index) {
     case NCT_VRM_INPUT:
-        valid = (ch->flags & NCT_VRM_F_GT) ? data->vrm_gt_valid : data->vrm_valid;
-        if (!valid)
+        if (!r->valid)
             return -ENODATA;
-        val = *(long*)((char*)data + ch->value_off);
+        val = r->val[ch->metric];
         break;
     case NCT_VRM_MIN:
-        if (!*(bool*)((char*)data + ch->hist_init_off))
+        if (!nct_vrm_rail_hist_ready(r, ch->metric))
             return -ENODATA;
-        val = *(long*)((char*)data + ch->min_off);
+        val = r->min[ch->metric];
         break;
     case NCT_VRM_MAX:
-        if (!*(bool*)((char*)data + ch->hist_init_off))
+        if (!nct_vrm_rail_hist_ready(r, ch->metric))
             return -ENODATA;
-        val = *(long*)((char*)data + ch->max_off);
+        val = r->max[ch->metric];
         break;
     default:
         return -EINVAL;
@@ -443,7 +308,7 @@ static umode_t nct6687_vrm_attr_is_visible(struct kobject* kobj,
     (void)idx;
     if (sattr->nr >= ARRAY_SIZE(nct_vrm_chans))
         return 0444;
-    if ((nct_vrm_chans[sattr->nr].flags & NCT_VRM_F_GT) && !vrm_gt)
+    if (nct_vrm_chans[sattr->nr].page == 1 && !vrm_gt)
         return 0;
     return 0444;
 }

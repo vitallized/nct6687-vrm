@@ -222,6 +222,12 @@ class VrmSample:
     vout_method: str
     iout_method: str
     base: int
+    # millisi, same values as kernel nct_vrm_sample_page out[].
+    vout_mv: int
+    vin_mv: int
+    iout_ma: int
+    pout_uw: int
+    temp_mc: int
     # CAP 0x19 / STATUS 0x78 are debug-only (CLI --raw), not the kernel sample.
     capability: int | None = None
     status: int | None = None
@@ -338,10 +344,29 @@ def _sample_page(
     debug: bool,
     base: int,
 ) -> VrmSample:
-    """Match nct_vrm_sample_page. CAP/STATUS only when debug=True (CLI --raw)."""
+    """Match nct_vrm_sample_page (tests/golden_vrm_sample.json).
+
+    Any failure invalidates the PAGE/VOUT_MODE cache, like the kernel.
+    CAP/STATUS only when debug=True (CLI --raw).
+    """
     if page > 1:
         raise ValueError(f"PAGE {page} out of range (0=CPU, 1=GT)")
+    try:
+        return _sample_page_seq(xfer, cache, addr, page, vout_exp, debug, base)
+    except (OSError, RuntimeError):
+        cache.invalidate()
+        raise
 
+
+def _sample_page_seq(
+    xfer: ByteXfer,
+    cache: _SmbusCache,
+    addr: int,
+    page: int,
+    vout_exp: int,
+    debug: bool,
+    base: int,
+) -> VrmSample:
     def rb(cmd: int) -> int:
         sts, value = xfer.read_byte(addr, cmd)
         _xfer_fail(sts, cmd)
@@ -383,16 +408,19 @@ def _sample_page(
     vout_v, vout_method = decode_vout(vout, vout_mode, vout_exp)
     p_mw = linear11_milli(pout)
     pout_w = linear11(pout)
+    t_mc = linear11_milli(temp)
     temp_c = linear11(temp)
     iout = 0
     if v_mv > 200:
-        iout_a = iout_from_pv_ma(p_mw, v_mv) / 1000.0
+        i_ma = iout_from_pv_ma(p_mw, v_mv)
         iout_method = "P/V"
     else:
         iout = rw(0x8C)
-        iout_a = decode_iout_fallback_ma(iout) / 1000.0
+        i_ma = decode_iout_fallback_ma(iout)
         iout_method = "linear16-N=-3"
-    vin_v = decode_vin_mv(vin) / 1000.0
+    iout_a = i_ma / 1000.0
+    vin_mv = decode_vin_mv(vin)
+    vin_v = vin_mv / 1000.0
 
     cap = status = None
     if debug:
@@ -417,6 +445,11 @@ def _sample_page(
         vout_method=vout_method,
         iout_method=iout_method,
         base=base,
+        vout_mv=v_mv,
+        vin_mv=vin_mv,
+        iout_ma=i_ma,
+        pout_uw=p_mw * 1000,
+        temp_mc=t_mc,
         capability=cap,
         status=status,
     )
