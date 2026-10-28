@@ -1,6 +1,7 @@
 /*
  * Host compile of dkms/nct6687_vrm_decode.h — no linux headers, no .ko.
- * pytest drives this against tests/golden_vrm_decode.json.
+ * pytest drives this against tests/golden_vrm_decode.json, and drives the
+ * rail slot (nct_vrm_rail_apply) through rail_seq.
  *
  *   cc -Wall -Werror -DNCT_VRM_DECODE_HOST -o vrm_decode tests/vrm_decode.c
  */
@@ -20,15 +21,51 @@ static void usage(void)
 		"       vrm_decode decode_vin_mv RAW\n"
 		"       vrm_decode decode_iout_fallback_ma RAW\n"
 		"       vrm_decode iout_from_pv_ma P_MW V_MV\n"
-		"       vrm_decode hist_seq nonneg|always VAL...\n"
 		"       vrm_decode should_sample VALID DEMANDED LAST_READ_SET GAP AGE HZ FLOOR FAILS\n"
-		"       vrm_decode fail_interval FAILS HZ\n");
+		"       vrm_decode fail_interval FAILS HZ\n"
+		"       vrm_decode rail_seq VOUT,VIN,IOUT,POUT,TEMP...\n");
+}
+
+/* Apply each PAGE sample to one fresh rail slot; print the slot. */
+static int rail_seq(int n, char** samples)
+{
+	static const char* const names[NCT_VRM_NMETRIC] = {
+		"vout", "vin", "iout", "pout", "temp",
+	};
+	struct nct_vrm_rail r;
+	long s[NCT_VRM_NMETRIC];
+	char* p;
+	int i, m;
+
+	memset(&r, 0, sizeof(r));
+	for (i = 0; i < n; i++) {
+		p = samples[i];
+		for (m = 0; m < NCT_VRM_NMETRIC; m++) {
+			s[m] = strtol(p, &p, 0);
+			if (*p != (m + 1 < NCT_VRM_NMETRIC ? ',' : '\0'))
+				return -1;
+			p++;
+		}
+		nct_vrm_rail_apply(&r, s);
+	}
+	printf("valid %d\n", r.valid ? 1 : 0);
+	for (m = 0; m < NCT_VRM_NMETRIC; m++)
+		printf("%s %ld %d %ld %ld\n", names[m], r.val[m],
+			nct_vrm_rail_hist_ready(&r, m) ? 1 : 0, r.min[m], r.max[m]);
+	return 0;
 }
 
 int main(int argc, char** argv)
 {
 	const char* fn;
 
+	if (argc >= 2 && !strcmp(argv[1], "rail_seq")) {
+		if (rail_seq(argc - 2, argv + 2)) {
+			usage();
+			return 2;
+		}
+		return 0;
+	}
 	if (argc < 3) {
 		usage();
 		return 2;
@@ -62,27 +99,6 @@ int main(int argc, char** argv)
 		printf("%ld\n",
 			nct_vrm_iout_from_pv_ma(strtol(argv[2], NULL, 0),
 				strtol(argv[3], NULL, 0)));
-		return 0;
-	}
-	if (!strcmp(fn, "hist_seq") && argc >= 4) {
-		bool reject_neg;
-		bool init = false;
-		long mn = 0;
-		long mx = 0;
-		int i;
-
-		if (!strcmp(argv[2], "nonneg"))
-			reject_neg = true;
-		else if (!strcmp(argv[2], "always"))
-			reject_neg = false;
-		else {
-			usage();
-			return 2;
-		}
-		for (i = 3; i < argc; i++)
-			nct_vrm_hist_add(&mn, &mx, &init, strtol(argv[i], NULL, 0),
-				reject_neg);
-		printf("%d %ld %ld\n", init ? 1 : 0, mn, mx);
 		return 0;
 	}
 	if (!strcmp(fn, "fail_interval") && argc == 4) {
