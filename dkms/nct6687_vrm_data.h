@@ -1,51 +1,28 @@
 /* Members only — spliced inside struct nct6687_data (see inject_text).
  * PAGE0=CPU, PAGE1=GT. Values are millisi. Do not include this file
  * except as a struct-body fragment.
+ *
+ * struct nct_vrm_rail is defined here, nested, because this fragment is the
+ * first VRM code the compiler sees (before any VRM header). C gives a nested
+ * struct tag file scope, so nct6687_vrm_decode.h can use it afterwards.
  */
+#define NCT_VRM_NMETRIC 5 /* enum nct_vrm_metric in nct6687_vrm_decode.h */
 	bool vrm_enabled;
-	bool vrm_valid;
-	bool vrm_gt_valid;
 	bool vrm_demand;
 	unsigned long vrm_last_updated;
 	unsigned long vrm_last_read;
 	unsigned long vrm_read_gap;
 	unsigned vrm_fail_count;
-	long vrm_vout; /* mV */
-	long vrm_vin;  /* mV */
-	long vrm_iout; /* mA */
-	long vrm_pout; /* uW */
-	long vrm_temp; /* mC */
-	long vrm_gt_vout;
-	long vrm_gt_vin;
-	long vrm_gt_iout;
-	long vrm_gt_pout;
-	long vrm_gt_temp;
 	int vrm_smbus_page;
 	u8 vrm_vout_mode_cache[2];
 	bool vrm_vout_mode_valid[2];
-	bool vrm_hist_init;
-	bool vrm_iout_hist_init;
-	bool vrm_pout_hist_init;
-	long vrm_vout_min;
-	long vrm_vout_max;
-	long vrm_vin_min;
-	long vrm_vin_max;
-	long vrm_iout_min;
-	long vrm_iout_max;
-	long vrm_pout_min;
-	long vrm_pout_max;
-	long vrm_temp_min;
-	long vrm_temp_max;
-	bool vrm_gt_hist_init;
-	bool vrm_gt_iout_hist_init;
-	bool vrm_gt_pout_hist_init;
-	long vrm_gt_vout_min;
-	long vrm_gt_vout_max;
-	long vrm_gt_vin_min;
-	long vrm_gt_vin_max;
-	long vrm_gt_iout_min;
-	long vrm_gt_iout_max;
-	long vrm_gt_pout_min;
-	long vrm_gt_pout_max;
-	long vrm_gt_temp_min;
-	long vrm_gt_temp_max;
+	/* One rail slot per PAGE. Written only by nct_vrm_rail_apply. */
+	struct nct_vrm_rail {
+		bool valid;
+		bool hist_init; /* VOUT, VIN, TEMP: seeded together */
+		bool iout_hist_init;
+		bool pout_hist_init;
+		long val[NCT_VRM_NMETRIC];
+		long min[NCT_VRM_NMETRIC];
+		long max[NCT_VRM_NMETRIC];
+	} vrm_rail[2];

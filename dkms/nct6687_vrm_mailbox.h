@@ -1,14 +1,23 @@
-/* eSIO mailbox: idle window, proto/START/status/payload.
+/* eSIO mailbox: idle window, proto/START/status/payload. Then the PAGE
+ * sample, the PMBus sequence built on those mailbox ops.
  *
  * Kernel C and the userspace reader (nct6687_vrm.py) keep the same named
  * ops. Host compile: tests/vrm_mailbox.c with -DNCT_VRM_MAILBOX_HOST
  * (fake inb/outb/delay inside that TU — no linux headers, no /dev/port).
+ * PAGE sample traffic must match tests/golden_vrm_sample.json.
  *
  * Caller holds EC_io_lock. PAGE idle is 0xFF. Ports 2/3 hang the EC;
  * this header never touches the port mux (0x61) or baud (0x62).
  */
 #ifndef NCT6687_VRM_MAILBOX_H
 #define NCT6687_VRM_MAILBOX_H
+
+#ifdef NCT_VRM_MAILBOX_HOST
+#ifndef NCT_VRM_DECODE_HOST
+#define NCT_VRM_DECODE_HOST 1
+#endif
+#endif
+#include "nct6687_vrm_decode.h"
 
 #define NCT_VRM_SMB_EN 0x80
 #define NCT_VRM_SMB_START 0x40
@@ -19,17 +28,11 @@
 
 #ifdef NCT_VRM_MAILBOX_HOST
 #include <errno.h>
-#include <stdint.h>
-typedef uint8_t u8;
-typedef uint16_t u16;
 #ifndef EC_SPACE_PAGE_REGISTER_OFFSET
 #define EC_SPACE_PAGE_REGISTER_OFFSET 4
 #define EC_SPACE_INDEX_REGISTER_OFFSET 5
 #define EC_SPACE_DATA_REGISTER_OFFSET 6
 #endif
-struct nct6687_data {
-	unsigned int addr;
-};
 void nct_vrm_host_outb(u16 port, u8 val);
 u8 nct_vrm_host_inb(u16 port);
 void nct_vrm_host_udelay(unsigned us);
@@ -209,6 +212,82 @@ static int nct_vrm_read_word(struct nct6687_data* data, u8 addr, u8 cmd, u16* ou
 	if (nct_vrm_esio_read(data, 4, 0xb0, &lo) || nct_vrm_esio_read(data, 4, 0xb1, &hi))
 		return -EIO;
 	*out = lo | (hi << 8);
+	return 0;
+}
+
+static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
+{
+	data->vrm_smbus_page = -1;
+	data->vrm_vout_mode_valid[0] = false;
+	data->vrm_vout_mode_valid[1] = false;
+}
+
+/*
+ * Production PAGE sample — source of truth for userspace _sample_page:
+ *   PAGE write+readback (cache miss), VOUT_MODE 0x20 (cached),
+ *   then VOUT 0x8B, POUT 0x96, VIN 0x88, TEMP 0x8D.
+ *   IOUT 0x8C only when decoded VOUT <= 200 mV; otherwise IOUT = P/V.
+ *   CAP 0x19 / STATUS 0x78 are not on this path (debug-only in userspace).
+ * Any failure invalidates the PAGE/VOUT_MODE cache. out[] is indexed by
+ * enum nct_vrm_metric and is only written on success.
+ */
+static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
+	int vout_exp, long out[NCT_VRM_NMETRIC])
+{
+	u16 vout, iout = 0, pout, vin, temp;
+	u8 vout_mode, page_r;
+	long v_mv, p_mw, t_mc, i_ma;
+
+	if (page > 1)
+		return -EINVAL;
+
+	if (data->vrm_smbus_page != page) {
+		if (nct_vrm_write_byte(data, addr, 0x00, page) || nct_vrm_read_byte(data, addr, 0x00, &page_r)) {
+			nct_vrm_invalidate_smbus(data);
+			return -EIO;
+		}
+		if (page_r != page) {
+			nct_vrm_invalidate_smbus(data);
+			return -EIO;
+		}
+		data->vrm_smbus_page = page;
+	}
+
+	if (!data->vrm_vout_mode_valid[page]) {
+		if (nct_vrm_read_byte(data, addr, 0x20, &vout_mode)) {
+			nct_vrm_invalidate_smbus(data);
+			return -EIO;
+		}
+		data->vrm_vout_mode_cache[page] = vout_mode;
+		data->vrm_vout_mode_valid[page] = true;
+	} else {
+		vout_mode = data->vrm_vout_mode_cache[page];
+	}
+
+	/* VOUT, POUT, VIN, TEMP — skip IOUT unless P/V is unusable. */
+	if (nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8d, &temp)) {
+		nct_vrm_invalidate_smbus(data);
+		return -EIO;
+	}
+
+	v_mv = nct_vrm_decode_vout_mv(vout, vout_mode, vout_exp);
+	p_mw = nct_vrm_linear11_milli(pout);
+	t_mc = nct_vrm_linear11_milli(temp);
+	if (v_mv > 200) {
+		i_ma = nct_vrm_iout_from_pv_ma(p_mw, v_mv);
+	} else {
+		if (nct_vrm_read_word(data, addr, 0x8c, &iout)) {
+			nct_vrm_invalidate_smbus(data);
+			return -EIO;
+		}
+		i_ma = nct_vrm_decode_iout_fallback_ma(iout);
+	}
+
+	out[NCT_VRM_VOUT] = v_mv;
+	out[NCT_VRM_VIN] = nct_vrm_decode_vin_mv(vin);
+	out[NCT_VRM_IOUT] = i_ma;
+	out[NCT_VRM_POUT] = p_mw * 1000L;
+	out[NCT_VRM_TEMP] = t_mc;
 	return 0;
 }
 

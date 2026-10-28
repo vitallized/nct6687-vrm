@@ -31,6 +31,7 @@ def c_mailbox_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "cc",
             "-Wall",
             "-Werror",
+            "-Wno-unused-function",
             "-DNCT_VRM_MAILBOX_HOST",
             "-o",
             str(out),
