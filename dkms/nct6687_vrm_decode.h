@@ -3,6 +3,9 @@
  * Kernel C and userspace Python (nct6687_vrm_decode.py) must return the same
  * values as tests/golden_vrm_decode.json. Host compile: tests/vrm_decode.c
  * with -DNCT_VRM_DECODE_HOST (no linux headers).
+ *
+ * Also owns the rail slot policy (nct_vrm_rail_apply): store one PAGE sample
+ * and fold it into the software hist.
  */
 #ifndef NCT6687_VRM_DECODE_H
 #define NCT6687_VRM_DECODE_H
@@ -10,9 +13,27 @@
 #ifdef NCT_VRM_DECODE_HOST
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 typedef uint8_t u8;
 typedef uint16_t u16;
+/* Host stand-in for stock struct nct6687_data: eSIO base + the real VRM
+ * data header, so host tests see the same rail slots as the kernel.
+ */
+struct nct6687_data {
+	unsigned int addr;
+#include "nct6687_vrm_data.h"
+};
 #endif
+
+/* Rail slot index. Order is the PAGE sample order of nct_vrm_rail.val[]. */
+enum nct_vrm_metric {
+	NCT_VRM_VOUT, /* mV */
+	NCT_VRM_VIN,  /* mV */
+	NCT_VRM_IOUT, /* mA */
+	NCT_VRM_POUT, /* uW */
+	NCT_VRM_TEMP, /* m°C */
+};
+_Static_assert(NCT_VRM_TEMP + 1 == NCT_VRM_NMETRIC, "NCT_VRM_NMETRIC");
 
 static int nct_vrm_clamp_exp(int exp)
 {
@@ -115,6 +136,42 @@ static void nct_vrm_hist_add(long* min, long* max, bool* init, long val,
 		return;
 	nct_vrm_hist_point(min, max, val, !*init);
 	*init = true;
+}
+
+/*
+ * Store one good PAGE sample in its rail slot and update the software hist.
+ * VOUT/VIN/TEMP share hist_init and always take the signed value; IOUT/POUT
+ * each seed on their own first non-negative sample.
+ */
+static void nct_vrm_rail_apply(struct nct_vrm_rail* r,
+	const long sample[NCT_VRM_NMETRIC])
+{
+	bool first = !r->hist_init;
+
+	memcpy(r->val, sample, sizeof(r->val));
+	r->valid = true;
+	nct_vrm_hist_point(&r->min[NCT_VRM_VOUT], &r->max[NCT_VRM_VOUT],
+		sample[NCT_VRM_VOUT], first);
+	nct_vrm_hist_point(&r->min[NCT_VRM_VIN], &r->max[NCT_VRM_VIN],
+		sample[NCT_VRM_VIN], first);
+	nct_vrm_hist_add(&r->min[NCT_VRM_IOUT], &r->max[NCT_VRM_IOUT],
+		&r->iout_hist_init, sample[NCT_VRM_IOUT], true);
+	nct_vrm_hist_add(&r->min[NCT_VRM_POUT], &r->max[NCT_VRM_POUT],
+		&r->pout_hist_init, sample[NCT_VRM_POUT], true);
+	nct_vrm_hist_point(&r->min[NCT_VRM_TEMP], &r->max[NCT_VRM_TEMP],
+		sample[NCT_VRM_TEMP], first);
+	r->hist_init = true;
+}
+
+/* min/max for this metric has at least one sample. */
+static bool nct_vrm_rail_hist_ready(const struct nct_vrm_rail* r,
+	enum nct_vrm_metric m)
+{
+	if (m == NCT_VRM_IOUT)
+		return r->iout_hist_init;
+	if (m == NCT_VRM_POUT)
+		return r->pout_hist_init;
+	return r->hist_init;
 }
 
 /*
