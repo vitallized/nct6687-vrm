@@ -146,6 +146,7 @@ static int nct_vrm_wait_start_clear(struct nct6687_data* data)
 	return -ETIMEDOUT;
 }
 
+/* 0 or -EBUSY (idle). Callers must not assume success. */
 static int nct_vrm_recover(struct nct6687_data* data)
 {
 	int rc = nct_vrm_prep_clear(data);
