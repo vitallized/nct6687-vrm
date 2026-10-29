@@ -235,7 +235,11 @@ def test_kernel_calls_should_sample_and_does_not_synthesize_hz_gap() -> None:
     assert "nct_vrm_should_sample(" in text
     assert "vrm_last_read ? now - data->vrm_last_read : HZ" not in text
     assert "vrm_fail_count" in text
-    assert "data->vrm_fail_count = 0" in text
+    assert "if (nct_vrm_bus_recover(data))" in text
+    restore = "if (nct_vrm_esio_write(data, 0x61, cfg_save) || nct_vrm_esio_write(data, 0x62, baud_save))"
+    assert restore in text
+    # Cleared only after a successful mux restore, not on the PAGE sample alone.
+    assert text.find(restore) < text.rfind("data->vrm_fail_count = 0")
 
 
 def _fail_interval(c_decode_bin: Path, fails: int, hz: int = HZ) -> int:
