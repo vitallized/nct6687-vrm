@@ -20,7 +20,7 @@ from nct6687_vrm import _SmbusCache, _sample_page, read_vrm
 GOLDEN = json.loads(Path(__file__).with_name("golden_vrm_sample.json").read_text())
 SCENARIOS = GOLDEN["scenarios"]
 ADDR = 0xC0
-MILLISI = ("vout_mv", "vin_mv", "iout_ma", "pout_uw", "temp_mc")
+MILLISI = ("vout_mv", "vin_mv", "iout_ma", "pout_uw", "temp_mc", "iin_ma", "pin_uw")
 
 
 def _int(v: int | str) -> int:
@@ -183,7 +183,9 @@ def test_python_sample_page_matches_golden(sc: dict) -> None:
         # SI floats are the same millisi, scaled.
         assert s.vout_v == pytest.approx(s.vout_mv / 1000.0)
         assert s.iout_a == pytest.approx(s.iout_ma / 1000.0)
+        assert s.iin_a == pytest.approx(s.iin_ma / 1000.0)
         assert s.pout_w == pytest.approx(s.pout_uw / 1_000_000.0)
+        assert s.pin_w == pytest.approx(s.pin_uw / 1_000_000.0)
     assert xfer.ops == exp["ops"]
     assert cache.page == exp["cache"]["page"]
     assert cache.vout_mode == _modes(exp["cache"]["vout_mode"])

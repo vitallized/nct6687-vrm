@@ -165,7 +165,7 @@ Linux `isl68137.c` DMPVR2 coefficients (src, matches that datasheet):
 | VOUT `0x40` → mV | Used on MS-7D89 | ISL68229: VOUT_MODE default `40h` = Direct 1 mV/LSB. **Family datasheet agrees.** |
 | VIN raw × 10 | “Renesas DMPVR2 Direct m=1,R=2” in HWiNFO notes | ISL68229 + isl68137 agree. |
 | POUT / TEMP LINEAR11 | PROTOCOL | **Family datasheet + isl68137: Direct, not LINEAR11.** When N=0, LINEAR11 `0x0029` and Direct `0x0029` both read as 41 — **local sample cannot distinguish.** |
-| IOUT | Prefer `POUT/VOUT`; “coarse LINEAR11-ish fallback” | Datasheet: Direct 0.1 A/LSB (`0x00E5` → 22.9 A). LINEAR11 of that word is nonsense (~229 A if N=0). |
+| IOUT / IIN / PIN | `READ_IOUT` Direct 0.1 A/LSB (`raw * 100` mA). `READ_IIN` Direct 0.01 A/LSB (`raw * 10` mA). `READ_PIN` Direct 1 W/LSB (`raw * 1000000` µW). Sample order is TEMP `0x8D`, VOUT `0x8B`, VIN `0x88`, IOUT `0x8C`, IIN `0x89`, POUT `0x96`, PIN `0x97`. | IOUT datasheet: Direct 0.1 A/LSB (`0x00E5` → 22.9 A). LINEAR11 of that word is nonsense (~229 A if N=0). IIN/PIN scales are the DMPVR2 family Direct coefficients. |
 
 **inf:** Treat MS-7D89 scalings as **DMPVR2-family** unless a RAA229131 PDF appears. PROTOCOL already warns Direct `m/R` are board-specific; POUT/TEMP-as-LINEAR11 is the weaker claim against the public family datasheet.
 
@@ -259,7 +259,7 @@ Nuvoton: allocate **8** ports. Inject’s `IOREGION_LENGTH 4 → 8` (BAR+0..+7) 
 | `IOREGION_LENGTH 8` | **Agrees** with Nuvoton “8 IO ports”; **fixes** nct6687d claiming only 4 at the wrong offset. |
 | VOUT Direct mV when VOUT_MODE=`0x40`; VIN ×10 | **Agrees** with ISL68229 + isl68137 DMPVR2. |
 | POUT/TEMP LINEAR11 | **Conflicts** with ISL68229 / isl68137 (Direct). May still numerically match when N=0. |
-| IOUT = POUT/VOUT | **Inference.** Family datasheet has READ_IOUT Direct 0.1 A/LSB. |
+| IOUT = READ_IOUT Direct 0.1 A/LSB; IIN 0.01 A/LSB; PIN 1 W/LSB | IOUT **agrees** with ISL68229 + isl68137. IIN/PIN use the same family Direct coefficients. Each word is its own command. |
 | Address 0xC0 universal | **Conflicts** with ISL68229 strap table. Board-specific (**local** already warns). |
 | “RAA229131” | **No public Renesas doc.** HWiNFO name is ISL69269/RAA229130. |
 | nct6687d “Kbuild broke the hook” | **Agrees** with 2026-08 Kbuild/`dkms.conf` commits. |

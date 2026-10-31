@@ -226,8 +226,9 @@ static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
 /*
  * Production PAGE sample — source of truth for userspace _sample_page:
  *   PAGE write+readback (cache miss), VOUT_MODE 0x20 (cached),
- *   then VOUT 0x8B, POUT 0x96, VIN 0x88, TEMP 0x8D.
- *   IOUT 0x8C only when decoded VOUT <= 200 mV; otherwise IOUT = P/V.
+ *   then TEMP 0x8D, VOUT 0x8B, VIN 0x88, IOUT 0x8C, IIN 0x89, POUT 0x96, PIN 0x97.
+ *   Same relative order as HWiNFO 8.54. TEMP2/TEMP3 are not on this path.
+ *   IOUT is always READ_IOUT (Direct, 0.1 A/LSB), not POUT/VOUT.
  *   CAP 0x19 / STATUS 0x78 are not on this path (debug-only in userspace).
  * Any failure invalidates the PAGE/VOUT_MODE cache. out[] is indexed by
  * enum nct_vrm_metric and is only written on success.
@@ -235,9 +236,9 @@ static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
 static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
 	int vout_exp, long out[NCT_VRM_NMETRIC])
 {
-	u16 vout, iout = 0, pout, vin, temp;
+	u16 vout, iout = 0, iin = 0, pout, pin = 0, vin, temp;
 	u8 vout_mode, page_r;
-	long v_mv, p_mw, t_mc, i_ma;
+	long v_mv, p_mw, t_mc, i_ma, iin_ma, pin_uw;
 
 	if (page > 1)
 		return -EINVAL;
@@ -265,8 +266,8 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
 		vout_mode = data->vrm_vout_mode_cache[page];
 	}
 
-	/* VOUT, POUT, VIN, TEMP — skip IOUT unless P/V is unusable. */
-	if (nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8d, &temp)) {
+	/* HWiNFO 8.54 order for these commands. Each word is its own command. */
+	if (nct_vrm_read_word(data, addr, 0x8d, &temp) || nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8c, &iout) || nct_vrm_read_word(data, addr, 0x89, &iin) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x97, &pin)) {
 		nct_vrm_invalidate_smbus(data);
 		return -EIO;
 	}
@@ -274,21 +275,17 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
 	v_mv = nct_vrm_decode_vout_mv(vout, vout_mode, vout_exp);
 	p_mw = nct_vrm_linear11_milli(pout);
 	t_mc = nct_vrm_linear11_milli(temp);
-	if (v_mv > 200) {
-		i_ma = nct_vrm_iout_from_pv_ma(p_mw, v_mv);
-	} else {
-		if (nct_vrm_read_word(data, addr, 0x8c, &iout)) {
-			nct_vrm_invalidate_smbus(data);
-			return -EIO;
-		}
-		i_ma = nct_vrm_decode_iout_fallback_ma(iout);
-	}
+	i_ma = nct_vrm_decode_iout_ma(iout);
+	iin_ma = nct_vrm_decode_iin_ma(iin);
+	pin_uw = nct_vrm_decode_pin_uw(pin);
 
 	out[NCT_VRM_VOUT] = v_mv;
 	out[NCT_VRM_VIN] = nct_vrm_decode_vin_mv(vin);
 	out[NCT_VRM_IOUT] = i_ma;
 	out[NCT_VRM_POUT] = p_mw * 1000L;
 	out[NCT_VRM_TEMP] = t_mc;
+	out[NCT_VRM_IIN] = iin_ma;
+	out[NCT_VRM_PIN] = pin_uw;
 	return 0;
 }
 

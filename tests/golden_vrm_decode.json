@@ -44,11 +44,46 @@
       "note": "VOUT LINEAR16 mode 0, VOUT_MODE 0x16 → N=-10; raw 0x04ef → (1263*1000)>>10 = 1233 mV"
     },
     {
-      "name": "iout_fallback_0x00e5",
-      "fn": "decode_iout_fallback_ma",
+      "name": "iout_direct_0x00e5",
+      "fn": "decode_iout_ma",
       "args": [229],
-      "expect": 28625,
-      "note": "IOUT fallback raw 0x00e5 → (229*1000)>>3 = 28625 mA"
+      "expect": 22900,
+      "note": "READ_IOUT Direct 0.1 A/LSB: 0x00E5 → 229*100 = 22900 mA"
+    },
+    {
+      "name": "iin_direct_0x0231",
+      "fn": "decode_iin_ma",
+      "args": [561],
+      "expect": 5610,
+      "note": "READ_IIN Direct 0.01 A/LSB: 0x0231 → 561*10 = 5610 mA"
+    },
+    {
+      "name": "pin_direct_0x0065",
+      "fn": "decode_pin_uw",
+      "args": [101],
+      "expect": 101000000,
+      "note": "READ_PIN Direct 1 W/LSB: 0x0065 → 101*1000000 = 101000000 uW"
+    },
+    {
+      "name": "efficiency_36w_over_61w",
+      "fn": "efficiency_pcm",
+      "args": [36000000, 61000000],
+      "expect": 59016,
+      "note": "36/61*100 = 59.016% → 59016 milli-percent. HWiNFO divides the two stored powers."
+    },
+    {
+      "name": "efficiency_clamps_at_100_percent",
+      "fn": "efficiency_pcm",
+      "args": [33000000, 29000000],
+      "expect": 100000,
+      "note": "33/29 is about 114%. HWiNFO minsd with 100.0, so this is 100%."
+    },
+    {
+      "name": "efficiency_hides_non_positive",
+      "fn": "efficiency_pcm",
+      "args": [-1000000, 101000000],
+      "expect": 0,
+      "note": "POUT or PIN <= 0: HWiNFO omits VRM Efficiency."
     },
     {
       "name": "clamp_exp_high",

@@ -383,9 +383,10 @@ int main(int argc, char** argv)
 		for (op = 0; op < pm_nops; op++)
 			printf("pmbus %s\n", pm_ops[op]);
 		if (!rc)
-			printf("out=%ld %ld %ld %ld %ld\n", sample[NCT_VRM_VOUT],
+			printf("out=%ld %ld %ld %ld %ld %ld %ld\n", sample[NCT_VRM_VOUT],
 				sample[NCT_VRM_VIN], sample[NCT_VRM_IOUT],
-				sample[NCT_VRM_POUT], sample[NCT_VRM_TEMP]);
+				sample[NCT_VRM_POUT], sample[NCT_VRM_TEMP],
+				sample[NCT_VRM_IIN], sample[NCT_VRM_PIN]);
 		dump_vrm_cache(&data);
 		return rc ? 1 : 0;
 	}

@@ -56,8 +56,28 @@ def decode_vin_mv(raw: int) -> int:
     return (raw & 0xFFFF) * 10
 
 
-def decode_iout_fallback_ma(raw: int) -> int:
-    return ((raw & 0xFFFF) * 1000) >> 3
+def decode_iout_ma(raw: int) -> int:
+    """READ_IOUT Direct, 0.1 A/LSB → milliamps."""
+    return (raw & 0xFFFF) * 100
+
+
+def decode_iin_ma(raw: int) -> int:
+    """READ_IIN Direct, 0.01 A/LSB → milliamps."""
+    return (raw & 0xFFFF) * 10
+
+
+def decode_pin_uw(raw: int) -> int:
+    """READ_PIN Direct, 1 W/LSB → microwatts."""
+    return (raw & 0xFFFF) * 1_000_000
+
+
+def efficiency_pcm(pout_uw: int, pin_uw: int) -> int:
+    """POUT/PIN as milli-percent, capped at 100%. Either power <= 0 → 0."""
+    if pout_uw <= 0 or pin_uw <= 0:
+        return 0
+    if pout_uw >= pin_uw:
+        return 100_000
+    return (pout_uw * 100_000) // pin_uw
 
 
 def iout_from_pv_ma(p_mw: int, v_mv: int) -> int:

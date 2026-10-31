@@ -6,7 +6,7 @@
  * first VRM code the compiler sees (before any VRM header). C gives a nested
  * struct tag file scope, so nct6687_vrm_decode.h can use it afterwards.
  */
-#define NCT_VRM_NMETRIC 5 /* enum nct_vrm_metric in nct6687_vrm_decode.h */
+#define NCT_VRM_NMETRIC 7 /* enum nct_vrm_metric in nct6687_vrm_decode.h */
 	bool vrm_enabled;
 	bool vrm_demand;
 	unsigned long vrm_last_updated;
@@ -22,7 +22,13 @@
 		bool hist_init; /* VOUT, VIN, TEMP: seeded together */
 		bool iout_hist_init;
 		bool pout_hist_init;
+		bool iin_hist_init;
+		bool pin_hist_init;
 		long val[NCT_VRM_NMETRIC];
 		long min[NCT_VRM_NMETRIC];
 		long max[NCT_VRM_NMETRIC];
 	} vrm_rail[2];
+	/* Stock EC thermistor "VRM MOS" (temp3). Not a PAGE sample. */
+	bool vrm_mos_hist_init;
+	long vrm_mos_min;
+	long vrm_mos_max;

@@ -32,8 +32,13 @@ enum nct_vrm_metric {
 	NCT_VRM_IOUT, /* mA */
 	NCT_VRM_POUT, /* uW */
 	NCT_VRM_TEMP, /* m°C */
+	NCT_VRM_IIN,  /* mA */
+	NCT_VRM_PIN,  /* uW */
 };
-_Static_assert(NCT_VRM_TEMP + 1 == NCT_VRM_NMETRIC, "NCT_VRM_NMETRIC");
+_Static_assert(NCT_VRM_PIN + 1 == NCT_VRM_NMETRIC, "NCT_VRM_NMETRIC");
+
+/* Not a val[] slot. POUT/PIN ratio, humidity milli-percent at show time. */
+#define NCT_VRM_EFF 255
 
 static int nct_vrm_clamp_exp(int exp)
 {
@@ -95,21 +100,48 @@ static long nct_vrm_decode_vin_mv(u16 vin)
 	return (long)vin * 10L;
 }
 
-/* Coarse LINEAR16 N=-3 when P/V is unusable: (raw * 1000) >> 3 milliamps. */
-static long nct_vrm_decode_iout_fallback_ma(u16 iout)
+/* READ_IOUT Direct, 0.1 A/LSB → milliamps. */
+static long nct_vrm_decode_iout_ma(u16 iout)
 {
-	return ((long)iout * 1000L) >> 3;
+	return (long)iout * 100L;
 }
 
-/* IOUT mA from already-decoded POUT mW and VOUT mV. Toward-zero like C `/`.
- * Caller owns the 200 mV / READ_IOUT policy. v_mv == 0 → 0.
+/* READ_IIN Direct, 0.01 A/LSB → milliamps. */
+static long nct_vrm_decode_iin_ma(u16 iin)
+{
+	return (long)iin * 10L;
+}
+
+/* READ_PIN Direct, 1 W/LSB → microwatts. */
+static long nct_vrm_decode_pin_uw(u16 pin)
+{
+	return (long)pin * 1000000L;
+}
+
+/*
+ * HWiNFO 8.54 "VRM Efficiency": POUT/PIN*100, then min(100).
+ * Milli-percent so humidity*_input prints as percent (libsensors /1000).
+ * Either power <= 0 → 0, and the show path returns no data.
+ * pout >= pin is the cap, and it also keeps pout*100000 inside signed long.
  */
+static long nct_vrm_efficiency_pcm(long pout_uw, long pin_uw)
+{
+	if (pout_uw <= 0 || pin_uw <= 0)
+		return 0;
+	if (pout_uw >= pin_uw)
+		return 100000L;
+	return (pout_uw * 100000L) / pin_uw;
+}
+
+#ifdef NCT_VRM_DECODE_HOST
+/* Not on the PAGE sample path. Toward-zero like C `/`. v_mv == 0 → 0. */
 static long nct_vrm_iout_from_pv_ma(long p_mw, long v_mv)
 {
 	if (!v_mv)
 		return 0;
 	return (p_mw * 1000L) / v_mv;
 }
+#endif
 
 /* Software min/max. first=true seeds both ends. */
 static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
@@ -125,8 +157,9 @@ static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
 }
 
 /*
- * IOUT (mA) and POUT (uW) use reject_neg: LINEAR11 can decode a signed spike
- * (live: -13900 mA / -17000000 uW) and hist would latch it until reload.
+ * IOUT, IIN (mA) and POUT, PIN (uW) use reject_neg. Live 2026-09-20 latched
+ * -13900 mA because IOUT was P/V of a LINEAR11 POUT spike (-17000000 uW).
+ * READ_IOUT Direct does not produce that spike; the guard stays.
  * VOUT/VIN/TEMP keep reject_neg=false.
  */
 static void nct_vrm_hist_add(long* min, long* max, bool* init, long val,
@@ -141,7 +174,7 @@ static void nct_vrm_hist_add(long* min, long* max, bool* init, long val,
 /*
  * Store one good PAGE sample in its rail slot and update the software hist.
  * VOUT/VIN/TEMP share hist_init and always take the signed value; IOUT/POUT
- * each seed on their own first non-negative sample.
+ * and IIN/PIN each seed on their own first non-negative sample.
  */
 static void nct_vrm_rail_apply(struct nct_vrm_rail* r,
 	const long sample[NCT_VRM_NMETRIC])
@@ -160,6 +193,10 @@ static void nct_vrm_rail_apply(struct nct_vrm_rail* r,
 		&r->pout_hist_init, sample[NCT_VRM_POUT], true);
 	nct_vrm_hist_point(&r->min[NCT_VRM_TEMP], &r->max[NCT_VRM_TEMP],
 		sample[NCT_VRM_TEMP], first);
+	nct_vrm_hist_add(&r->min[NCT_VRM_IIN], &r->max[NCT_VRM_IIN],
+		&r->iin_hist_init, sample[NCT_VRM_IIN], true);
+	nct_vrm_hist_add(&r->min[NCT_VRM_PIN], &r->max[NCT_VRM_PIN],
+		&r->pin_hist_init, sample[NCT_VRM_PIN], true);
 	r->hist_init = true;
 }
 
@@ -171,6 +208,10 @@ static bool nct_vrm_rail_hist_ready(const struct nct_vrm_rail* r,
 		return r->iout_hist_init;
 	if (m == NCT_VRM_POUT)
 		return r->pout_hist_init;
+	if (m == NCT_VRM_IIN)
+		return r->iin_hist_init;
+	if (m == NCT_VRM_PIN)
+		return r->pin_hist_init;
 	return r->hist_init;
 }
 

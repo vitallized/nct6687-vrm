@@ -13,7 +13,7 @@ One SMBus-master transaction (proto, START, status, payload) over the eSIO windo
 _Avoid_: ByteIO, C ByteIO, host SMBus
 
 **PAGE sample**:
-One PMBus PAGE’s VOUT, VIN, IOUT, POUT, and TEMP after decode to millisi.
+One PMBus PAGE’s VOUT, VIN, IOUT, IIN, POUT, PIN, and TEMP after decode to millisi. IOUT is `READ_IOUT` (Direct, 0.1 A per count). IIN is `READ_IIN` (Direct, 0.01 A per count). PIN is `READ_PIN` (Direct, 1 W per count). Read order is TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. Efficiency is `POUT/PIN` capped at 100%, not another register.
 _Avoid_: rail decode, full scan, sensor poll
 
 **millisi**:
@@ -33,7 +33,7 @@ The members that live on `nct6687_data` for VRM cache, hist, and PAGE/VOUT_MODE 
 _Avoid_: STRUCT_FIELDS, Python field list
 
 **software hist**:
-Per-device min/max of PAGE samples. IOUT (mA) and POUT (µW) drop a negative millisi sample so a LINEAR11 spike cannot latch the min. VOUT/VIN/TEMP still take the signed value.
+Per-device min/max of PAGE samples, plus the stock VRM MOS thermistor (`temp3`). IOUT, IIN (mA) and POUT, PIN (µW) drop a negative millisi sample. POUT can still be a LINEAR11 spike. The current and PIN reads are unsigned Direct, so that drop is only a guard. VOUT/VIN/TEMP still take the signed value. POUT and PIN are published as `power*_input_lowest` / `power*_input_highest` so `sensors` prints lowest then highest.
 _Avoid_: hwmon chip min, HWiNFO peak
 
 **VRM demand**:
