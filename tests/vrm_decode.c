@@ -19,18 +19,21 @@ static void usage(void)
 		"       vrm_decode linear11_milli RAW\n"
 		"       vrm_decode decode_vout_mv RAW VOUT_MODE FALLBACK_EXP\n"
 		"       vrm_decode decode_vin_mv RAW\n"
-		"       vrm_decode decode_iout_fallback_ma RAW\n"
+		"       vrm_decode decode_iout_ma RAW\n"
+		"       vrm_decode decode_iin_ma RAW\n"
+		"       vrm_decode decode_pin_uw RAW\n"
+		"       vrm_decode efficiency_pcm POUT_UW PIN_UW\n"
 		"       vrm_decode iout_from_pv_ma P_MW V_MV\n"
 		"       vrm_decode should_sample VALID DEMANDED LAST_READ_SET GAP AGE HZ FLOOR FAILS\n"
 		"       vrm_decode fail_interval FAILS HZ\n"
-		"       vrm_decode rail_seq VOUT,VIN,IOUT,POUT,TEMP...\n");
+		"       vrm_decode rail_seq VOUT,VIN,IOUT,POUT,TEMP,IIN,PIN...\n");
 }
 
 /* Apply each PAGE sample to one fresh rail slot; print the slot. */
 static int rail_seq(int n, char** samples)
 {
 	static const char* const names[NCT_VRM_NMETRIC] = {
-		"vout", "vin", "iout", "pout", "temp",
+		"vout", "vin", "iout", "pout", "temp", "iin", "pin",
 	};
 	struct nct_vrm_rail r;
 	long s[NCT_VRM_NMETRIC];
@@ -90,9 +93,25 @@ int main(int argc, char** argv)
 		printf("%ld\n", nct_vrm_decode_vin_mv((u16)strtoul(argv[2], NULL, 0)));
 		return 0;
 	}
-	if (!strcmp(fn, "decode_iout_fallback_ma") && argc == 3) {
+	if (!strcmp(fn, "decode_iout_ma") && argc == 3) {
 		printf("%ld\n",
-			nct_vrm_decode_iout_fallback_ma((u16)strtoul(argv[2], NULL, 0)));
+			nct_vrm_decode_iout_ma((u16)strtoul(argv[2], NULL, 0)));
+		return 0;
+	}
+	if (!strcmp(fn, "decode_iin_ma") && argc == 3) {
+		printf("%ld\n",
+			nct_vrm_decode_iin_ma((u16)strtoul(argv[2], NULL, 0)));
+		return 0;
+	}
+	if (!strcmp(fn, "decode_pin_uw") && argc == 3) {
+		printf("%ld\n",
+			nct_vrm_decode_pin_uw((u16)strtoul(argv[2], NULL, 0)));
+		return 0;
+	}
+	if (!strcmp(fn, "efficiency_pcm") && argc == 4) {
+		printf("%ld\n",
+			nct_vrm_efficiency_pcm(strtol(argv[2], NULL, 0),
+				strtol(argv[3], NULL, 0)));
 		return 0;
 	}
 	if (!strcmp(fn, "iout_from_pv_ma") && argc == 4) {

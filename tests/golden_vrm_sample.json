@@ -5,206 +5,614 @@
       "name": "cold_cache_page0_writes_page_and_reads_vout_mode",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": -1, "vout_mode": [null, null]},
+      "cache": {
+        "page": -1,
+        "vout_mode": [
+          null,
+          null
+        ]
+      },
       "device": {
-        "bytes": {"0x20": "0x40"},
-        "words": {"0x8b": "0x04d2", "0x96": "0x0032", "0x88": "0x04b0", "0x8d": "0x0028"}
+        "bytes": {
+          "0x20": "0x40"
+        },
+        "words": {
+          "0x8c": "0x00e5",
+          "0x8b": "0x04d2",
+          "0x96": "0x0032",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028",
+          "0x89": "0x0231",
+          "0x97": "0x0065"
+        }
       },
       "expect": {
         "ops": [
           "write_byte 0x00 0x00",
           "read_byte 0x00",
           "read_byte 0x20",
+          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x96",
           "read_word 0x88",
-          "read_word 0x8d"
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96",
+          "read_word 0x97"
         ],
         "error": false,
-        "millisi": {"vout_mv": 1234, "vin_mv": 12000, "iout_ma": 40518, "pout_uw": 50000000, "temp_mc": 40000},
-        "cache": {"page": 0, "vout_mode": ["0x40", null]}
+        "millisi": {
+          "vout_mv": 1234,
+          "vin_mv": 12000,
+          "iout_ma": 22900,
+          "pout_uw": 50000000,
+          "temp_mc": 40000,
+          "iin_ma": 5610,
+          "pin_uw": 101000000
+        },
+        "cache": {
+          "page": 0,
+          "vout_mode": [
+            "0x40",
+            null
+          ]
+        }
       }
     },
     {
       "name": "warm_cache_skips_page_and_vout_mode",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": ["0x40", null]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          "0x40",
+          null
+        ]
+      },
       "device": {
-        "bytes": {"0x20": "0x17"},
-        "words": {"0x8b": "0x04d2", "0x96": "0x0032", "0x88": "0x04b0", "0x8d": "0x0028"}
+        "bytes": {
+          "0x20": "0x17"
+        },
+        "words": {
+          "0x8c": "0x00e5",
+          "0x8b": "0x04d2",
+          "0x96": "0x0032",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028",
+          "0x89": "0x0231",
+          "0x97": "0x0065"
+        }
       },
       "expect": {
-        "ops": ["read_word 0x8b", "read_word 0x96", "read_word 0x88", "read_word 0x8d"],
+        "ops": [
+          "read_word 0x8d",
+          "read_word 0x8b",
+          "read_word 0x88",
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96",
+          "read_word 0x97"
+        ],
         "error": false,
-        "millisi": {"vout_mv": 1234, "vin_mv": 12000, "iout_ma": 40518, "pout_uw": 50000000, "temp_mc": 40000},
-        "cache": {"page": 0, "vout_mode": ["0x40", null]}
+        "millisi": {
+          "vout_mv": 1234,
+          "vin_mv": 12000,
+          "iout_ma": 22900,
+          "pout_uw": 50000000,
+          "temp_mc": 40000,
+          "iin_ma": 5610,
+          "pin_uw": 101000000
+        },
+        "cache": {
+          "page": 0,
+          "vout_mode": [
+            "0x40",
+            null
+          ]
+        }
       }
     },
     {
       "name": "vout_at_200mv_reads_iout_0x8c",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": ["0x40", null]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          "0x40",
+          null
+        ]
+      },
       "device": {
-        "words": {"0x8b": "0x00c8", "0x96": "0x0032", "0x88": "0x04b0", "0x8d": "0x0028", "0x8c": "0x00b8"}
+        "words": {
+          "0x8b": "0x00c8",
+          "0x96": "0x0032",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028",
+          "0x8c": "0x00b8",
+          "0x89": "0x0231",
+          "0x97": "0x0065"
+        }
       },
       "expect": {
-        "ops": ["read_word 0x8b", "read_word 0x96", "read_word 0x88", "read_word 0x8d", "read_word 0x8c"],
+        "ops": [
+          "read_word 0x8d",
+          "read_word 0x8b",
+          "read_word 0x88",
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96",
+          "read_word 0x97"
+        ],
         "error": false,
-        "millisi": {"vout_mv": 200, "vin_mv": 12000, "iout_ma": 23000, "pout_uw": 50000000, "temp_mc": 40000},
-        "cache": {"page": 0, "vout_mode": ["0x40", null]}
+        "millisi": {
+          "vout_mv": 200,
+          "vin_mv": 12000,
+          "iout_ma": 18400,
+          "pout_uw": 50000000,
+          "temp_mc": 40000,
+          "iin_ma": 5610,
+          "pin_uw": 101000000
+        },
+        "cache": {
+          "page": 0,
+          "vout_mode": [
+            "0x40",
+            null
+          ]
+        }
       }
     },
     {
       "name": "vout_zero_reads_iout_0x8c",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": ["0x40", null]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          "0x40",
+          null
+        ]
+      },
       "device": {
-        "words": {"0x8b": "0x0000", "0x96": "0x0000", "0x88": "0x04b0", "0x8d": "0x0028", "0x8c": "0x0008"}
+        "words": {
+          "0x8b": "0x0000",
+          "0x96": "0x0000",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028",
+          "0x8c": "0x0008",
+          "0x89": "0x0231",
+          "0x97": "0x0065"
+        }
       },
       "expect": {
-        "ops": ["read_word 0x8b", "read_word 0x96", "read_word 0x88", "read_word 0x8d", "read_word 0x8c"],
+        "ops": [
+          "read_word 0x8d",
+          "read_word 0x8b",
+          "read_word 0x88",
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96",
+          "read_word 0x97"
+        ],
         "error": false,
-        "millisi": {"vout_mv": 0, "vin_mv": 12000, "iout_ma": 1000, "pout_uw": 0, "temp_mc": 40000},
-        "cache": {"page": 0, "vout_mode": ["0x40", null]}
+        "millisi": {
+          "vout_mv": 0,
+          "vin_mv": 12000,
+          "iout_ma": 800,
+          "pout_uw": 0,
+          "temp_mc": 40000,
+          "iin_ma": 5610,
+          "pin_uw": 101000000
+        },
+        "cache": {
+          "page": 0,
+          "vout_mode": [
+            "0x40",
+            null
+          ]
+        }
       }
     },
     {
       "name": "linear16_vout_mode_exp_minus_9",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": [null, null]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          null,
+          null
+        ]
+      },
       "device": {
-        "bytes": {"0x20": "0x17"},
-        "words": {"0x8b": "0x0266", "0x96": "0x0032", "0x88": "0x04b0", "0x8d": "0x0028"}
+        "bytes": {
+          "0x20": "0x17"
+        },
+        "words": {
+          "0x8c": "0x00e5",
+          "0x8b": "0x0266",
+          "0x96": "0x0032",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028",
+          "0x89": "0x0231",
+          "0x97": "0x0065"
+        }
       },
       "expect": {
-        "ops": ["read_byte 0x20", "read_word 0x8b", "read_word 0x96", "read_word 0x88", "read_word 0x8d"],
+        "ops": [
+          "read_byte 0x20",
+          "read_word 0x8d",
+          "read_word 0x8b",
+          "read_word 0x88",
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96",
+          "read_word 0x97"
+        ],
         "error": false,
-        "millisi": {"vout_mv": 1199, "vin_mv": 12000, "iout_ma": 41701, "pout_uw": 50000000, "temp_mc": 40000},
-        "cache": {"page": 0, "vout_mode": ["0x17", null]}
+        "millisi": {
+          "vout_mv": 1199,
+          "vin_mv": 12000,
+          "iout_ma": 22900,
+          "pout_uw": 50000000,
+          "temp_mc": 40000,
+          "iin_ma": 5610,
+          "pin_uw": 101000000
+        },
+        "cache": {
+          "page": 0,
+          "vout_mode": [
+            "0x17",
+            null
+          ]
+        }
       }
     },
     {
       "name": "unknown_vout_mode_uses_fallback_exp",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": ["0x20", null]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          "0x20",
+          null
+        ]
+      },
       "device": {
-        "words": {"0x8b": "0x04cd", "0x96": "0x0032", "0x88": "0x04b0", "0x8d": "0x0028"}
+        "words": {
+          "0x8c": "0x00e5",
+          "0x8b": "0x04cd",
+          "0x96": "0x0032",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028",
+          "0x89": "0x0231",
+          "0x97": "0x0065"
+        }
       },
       "expect": {
-        "ops": ["read_word 0x8b", "read_word 0x96", "read_word 0x88", "read_word 0x8d"],
+        "ops": [
+          "read_word 0x8d",
+          "read_word 0x8b",
+          "read_word 0x88",
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96",
+          "read_word 0x97"
+        ],
         "error": false,
-        "millisi": {"vout_mv": 1200, "vin_mv": 12000, "iout_ma": 41666, "pout_uw": 50000000, "temp_mc": 40000},
-        "cache": {"page": 0, "vout_mode": ["0x20", null]}
+        "millisi": {
+          "vout_mv": 1200,
+          "vin_mv": 12000,
+          "iout_ma": 22900,
+          "pout_uw": 50000000,
+          "temp_mc": 40000,
+          "iin_ma": 5610,
+          "pin_uw": 101000000
+        },
+        "cache": {
+          "page": 0,
+          "vout_mode": [
+            "0x20",
+            null
+          ]
+        }
       }
     },
     {
-      "name": "negative_linear11_pout_gives_negative_pv_iout",
+      "name": "negative_linear11_pout_iout_still_from_chip",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": ["0x40", null]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          "0x40",
+          null
+        ]
+      },
       "device": {
-        "words": {"0x8b": "0x04d2", "0x96": "0x07ff", "0x88": "0x04b0", "0x8d": "0x0028"}
+        "words": {
+          "0x8c": "0x00e5",
+          "0x8b": "0x04d2",
+          "0x96": "0x07ff",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028",
+          "0x89": "0x0231",
+          "0x97": "0x0065"
+        }
       },
       "expect": {
-        "ops": ["read_word 0x8b", "read_word 0x96", "read_word 0x88", "read_word 0x8d"],
+        "ops": [
+          "read_word 0x8d",
+          "read_word 0x8b",
+          "read_word 0x88",
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96",
+          "read_word 0x97"
+        ],
         "error": false,
-        "millisi": {"vout_mv": 1234, "vin_mv": 12000, "iout_ma": -810, "pout_uw": -1000000, "temp_mc": 40000},
-        "cache": {"page": 0, "vout_mode": ["0x40", null]}
+        "millisi": {
+          "vout_mv": 1234,
+          "vin_mv": 12000,
+          "iout_ma": 22900,
+          "pout_uw": -1000000,
+          "temp_mc": 40000,
+          "iin_ma": 5610,
+          "pin_uw": 101000000
+        },
+        "cache": {
+          "page": 0,
+          "vout_mode": [
+            "0x40",
+            null
+          ]
+        }
       }
     },
     {
       "name": "gt_page1_switch_from_cached_page0",
       "page": 1,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": ["0x40", null]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          "0x40",
+          null
+        ]
+      },
       "device": {
-        "bytes": {"0x20": "0x40"},
-        "words": {"0x8b": "0x0352", "0x96": "0x000a", "0x88": "0x04b0", "0x8d": "0x0023"}
+        "bytes": {
+          "0x20": "0x40"
+        },
+        "words": {
+          "0x8c": "0x0064",
+          "0x8b": "0x0352",
+          "0x96": "0x000a",
+          "0x88": "0x04b0",
+          "0x8d": "0x0023",
+          "0x89": "0x0231",
+          "0x97": "0x0065"
+        }
       },
       "expect": {
         "ops": [
           "write_byte 0x00 0x01",
           "read_byte 0x00",
           "read_byte 0x20",
+          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x96",
           "read_word 0x88",
-          "read_word 0x8d"
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96",
+          "read_word 0x97"
         ],
         "error": false,
-        "millisi": {"vout_mv": 850, "vin_mv": 12000, "iout_ma": 11764, "pout_uw": 10000000, "temp_mc": 35000},
-        "cache": {"page": 1, "vout_mode": ["0x40", "0x40"]}
+        "millisi": {
+          "vout_mv": 850,
+          "vin_mv": 12000,
+          "iout_ma": 10000,
+          "pout_uw": 10000000,
+          "temp_mc": 35000,
+          "iin_ma": 5610,
+          "pin_uw": 101000000
+        },
+        "cache": {
+          "page": 1,
+          "vout_mode": [
+            "0x40",
+            "0x40"
+          ]
+        }
       }
     },
     {
       "name": "page_readback_mismatch_invalidates_cache",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 1, "vout_mode": ["0x40", "0x40"]},
-      "device": {"page_readback": "0x01"},
+      "cache": {
+        "page": 1,
+        "vout_mode": [
+          "0x40",
+          "0x40"
+        ]
+      },
+      "device": {
+        "page_readback": "0x01"
+      },
       "expect": {
-        "ops": ["write_byte 0x00 0x00", "read_byte 0x00"],
+        "ops": [
+          "write_byte 0x00 0x00",
+          "read_byte 0x00"
+        ],
         "error": true,
-        "cache": {"page": -1, "vout_mode": [null, null]}
+        "cache": {
+          "page": -1,
+          "vout_mode": [
+            null,
+            null
+          ]
+        }
       }
     },
     {
       "name": "page_write_nack_invalidates_cache",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": -1, "vout_mode": [null, "0x40"]},
-      "device": {"fail": [{"op": "write_byte", "cmd": "0x00", "status": "0x02"}]},
+      "cache": {
+        "page": -1,
+        "vout_mode": [
+          null,
+          "0x40"
+        ]
+      },
+      "device": {
+        "fail": [
+          {
+            "op": "write_byte",
+            "cmd": "0x00",
+            "status": "0x02"
+          }
+        ]
+      },
       "expect": {
-        "ops": ["write_byte 0x00 0x00"],
+        "ops": [
+          "write_byte 0x00 0x00"
+        ],
         "error": true,
-        "cache": {"page": -1, "vout_mode": [null, null]}
+        "cache": {
+          "page": -1,
+          "vout_mode": [
+            null,
+            null
+          ]
+        }
       }
     },
     {
       "name": "vout_mode_read_failure_invalidates_cache",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": [null, "0x40"]},
-      "device": {"fail": [{"op": "read_byte", "cmd": "0x20", "status": "0x01"}]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          null,
+          "0x40"
+        ]
+      },
+      "device": {
+        "fail": [
+          {
+            "op": "read_byte",
+            "cmd": "0x20",
+            "status": "0x01"
+          }
+        ]
+      },
       "expect": {
-        "ops": ["read_byte 0x20"],
+        "ops": [
+          "read_byte 0x20"
+        ],
         "error": true,
-        "cache": {"page": -1, "vout_mode": [null, null]}
+        "cache": {
+          "page": -1,
+          "vout_mode": [
+            null,
+            null
+          ]
+        }
       }
     },
     {
       "name": "mid_sequence_pout_failure_invalidates_cache",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": ["0x40", "0x40"]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          "0x40",
+          "0x40"
+        ]
+      },
       "device": {
-        "words": {"0x8b": "0x04d2", "0x96": "0x0032", "0x88": "0x04b0", "0x8d": "0x0028"},
-        "fail": [{"op": "read_word", "cmd": "0x96", "status": "0x01"}]
+        "words": {
+          "0x8c": "0x00e5",
+          "0x8b": "0x04d2",
+          "0x96": "0x0032",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028",
+          "0x89": "0x0231"
+        },
+        "fail": [
+          {
+            "op": "read_word",
+            "cmd": "0x96",
+            "status": "0x01"
+          }
+        ]
       },
       "expect": {
-        "ops": ["read_word 0x8b", "read_word 0x96"],
+        "ops": [
+          "read_word 0x8d",
+          "read_word 0x8b",
+          "read_word 0x88",
+          "read_word 0x8c",
+          "read_word 0x89",
+          "read_word 0x96"
+        ],
         "error": true,
-        "cache": {"page": -1, "vout_mode": [null, null]}
+        "cache": {
+          "page": -1,
+          "vout_mode": [
+            null,
+            null
+          ]
+        }
       }
     },
     {
-      "name": "iout_fallback_failure_invalidates_cache",
+      "name": "iout_read_failure_invalidates_cache",
       "page": 0,
       "vout_exp": -10,
-      "cache": {"page": 0, "vout_mode": ["0x40", null]},
+      "cache": {
+        "page": 0,
+        "vout_mode": [
+          "0x40",
+          null
+        ]
+      },
       "device": {
-        "words": {"0x8b": "0x0064", "0x96": "0x0032", "0x88": "0x04b0", "0x8d": "0x0028"},
-        "fail": [{"op": "read_word", "cmd": "0x8c", "status": "0x01"}]
+        "words": {
+          "0x8b": "0x0064",
+          "0x96": "0x0032",
+          "0x88": "0x04b0",
+          "0x8d": "0x0028"
+        },
+        "fail": [
+          {
+            "op": "read_word",
+            "cmd": "0x8c",
+            "status": "0x01"
+          }
+        ]
       },
       "expect": {
-        "ops": ["read_word 0x8b", "read_word 0x96", "read_word 0x88", "read_word 0x8d", "read_word 0x8c"],
+        "ops": [
+          "read_word 0x8d",
+          "read_word 0x8b",
+          "read_word 0x88",
+          "read_word 0x8c"
+        ],
         "error": true,
-        "cache": {"page": -1, "vout_mode": [null, null]}
+        "cache": {
+          "page": -1,
+          "vout_mode": [
+            null,
+            null
+          ]
+        }
       }
     }
   ]

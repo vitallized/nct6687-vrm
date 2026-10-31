@@ -30,11 +30,13 @@ from pathlib import Path
 from typing import Protocol
 
 from nct6687_vrm_decode import (
-    decode_iout_fallback_ma,
+    decode_iin_ma,
+    decode_iout_ma,
+    efficiency_pcm,
+    decode_pin_uw,
     decode_vin_mv,
     decode_vout,
     decode_vout_mv,
-    iout_from_pv_ma,
     linear11,
     linear11_milli,
 )
@@ -211,12 +213,16 @@ class VrmSample:
     vout_mode: int
     vout_raw: int
     iout_raw: int
+    iin_raw: int
     pout_raw: int
+    pin_raw: int
     vin_raw: int
     temp_raw: int
     vout_v: float
     iout_a: float
+    iin_a: float
     pout_w: float
+    pin_w: float
     vin_v: float
     temp_c: float
     vout_method: str
@@ -226,7 +232,10 @@ class VrmSample:
     vout_mv: int
     vin_mv: int
     iout_ma: int
+    iin_ma: int
     pout_uw: int
+    pin_uw: int
+    eff_pcm: int
     temp_mc: int
     # CAP 0x19 / STATUS 0x78 are debug-only (CLI --raw), not the kernel sample.
     capability: int | None = None
@@ -398,11 +407,14 @@ def _sample_page_seq(
     else:
         vout_mode = cached_mode
 
-    # VOUT, POUT, VIN, TEMP — skip IOUT unless P/V is unusable (kernel order).
-    vout = rw(0x8B)
-    pout = rw(0x96)
-    vin = rw(0x88)
+    # TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. Same order as the kernel sample.
     temp = rw(0x8D)
+    vout = rw(0x8B)
+    vin = rw(0x88)
+    iout = rw(0x8C)
+    iin = rw(0x89)
+    pout = rw(0x96)
+    pin = rw(0x97)
 
     v_mv = decode_vout_mv(vout, vout_mode, vout_exp)
     vout_v, vout_method = decode_vout(vout, vout_mode, vout_exp)
@@ -410,15 +422,14 @@ def _sample_page_seq(
     pout_w = linear11(pout)
     t_mc = linear11_milli(temp)
     temp_c = linear11(temp)
-    iout = 0
-    if v_mv > 200:
-        i_ma = iout_from_pv_ma(p_mw, v_mv)
-        iout_method = "P/V"
-    else:
-        iout = rw(0x8C)
-        i_ma = decode_iout_fallback_ma(iout)
-        iout_method = "linear16-N=-3"
+    i_ma = decode_iout_ma(iout)
+    iout_method = "READ_IOUT 0.1A"
     iout_a = i_ma / 1000.0
+    iin_ma = decode_iin_ma(iin)
+    iin_a = iin_ma / 1000.0
+    pin_uw = decode_pin_uw(pin)
+    pin_w = pin_uw / 1_000_000.0
+    eff = efficiency_pcm(p_mw * 1000, pin_uw)
     vin_mv = decode_vin_mv(vin)
     vin_v = vin_mv / 1000.0
 
@@ -434,12 +445,16 @@ def _sample_page_seq(
         vout_mode=vout_mode,
         vout_raw=vout,
         iout_raw=iout,
+        iin_raw=iin,
         pout_raw=pout,
+        pin_raw=pin,
         vin_raw=vin,
         temp_raw=temp,
         vout_v=vout_v,
         iout_a=iout_a,
+        iin_a=iin_a,
         pout_w=pout_w,
+        pin_w=pin_w,
         vin_v=vin_v,
         temp_c=temp_c,
         vout_method=vout_method,
@@ -448,7 +463,10 @@ def _sample_page_seq(
         vout_mv=v_mv,
         vin_mv=vin_mv,
         iout_ma=i_ma,
+        iin_ma=iin_ma,
         pout_uw=p_mw * 1000,
+        pin_uw=pin_uw,
+        eff_pcm=eff,
         temp_mc=t_mc,
         capability=cap,
         status=status,
@@ -510,7 +528,14 @@ def format_sensors(s: VrmSample, name: str | None = None) -> str:
         f"Adapter: NCT6687 eSIO SMBus @ 0x{s.base:04x}",
         f"VRM {rail} Voltage: {s.vout_v:8.3f} V  (RAW 0x{s.vout_raw:04x}, {s.vout_method})",
         f"VRM {rail} Current: {s.iout_a:8.3f} A  ({s.iout_method}; RAW 0x{s.iout_raw:04x})",
+        f"VRM {rail} IIN:     {s.iin_a:8.3f} A  (READ_IIN 0.01A; RAW 0x{s.iin_raw:04x})",
         f"VRM {rail} Power:   {s.pout_w:8.3f} W  (RAW 0x{s.pout_raw:04x})",
+        f"VRM {rail} PIN:     {s.pin_w:8.3f} W  (READ_PIN 1W; RAW 0x{s.pin_raw:04x})",
+        (
+            f"VRM {rail} Efficiency: {s.eff_pcm / 1000.0:5.1f} %"
+            if s.eff_pcm > 0
+            else f"VRM {rail} Efficiency:   n/a"
+        ),
         f"VRM {rail} VIN:     {s.vin_v:8.3f} V  (Direct 10mV; RAW 0x{s.vin_raw:04x})",
         f"VRM {rail} Temp:    {s.temp_c:8.1f} °C (RAW 0x{s.temp_raw:04x})",
         f"VOUT_MODE:     0x{s.vout_mode:02x}",

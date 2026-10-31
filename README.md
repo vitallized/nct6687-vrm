@@ -68,12 +68,18 @@ sensors
 |-------|---------|------|
 | `in20_input` | CPU VOUT | mV |
 | `in21_input` | CPU VIN | mV |
-| `curr1_input` | CPU IOUT | mA |
+| `curr1_input` | CPU IOUT (`READ_IOUT`, 0.1 A/count) | mA |
+| `curr3_input` | CPU IIN (`READ_IIN`, 0.01 A/count) | mA |
 | `power1_input` | CPU POUT | µW |
+| `power1_input_lowest` / `power1_input_highest` | CPU POUT software hist | µW |
+| `power3_input` | CPU PIN (`READ_PIN`, 1 W/count) | µW |
+| `power3_input_lowest` / `power3_input_highest` | CPU PIN software hist | µW |
+| `humidity1_input` | CPU efficiency, `POUT/PIN` capped at 100% | milli-percent |
 | `temp20_input` | VR temperature | m°C |
+| `temp3_min` / `temp3_max` | VRM MOS software hist | m°C |
 | `vrm_cpu` | CPU VOUT + IOUT + POUT (one read) | mV mA µW |
 
-Background PAGE samples stay at 1 Hz (fan/temp hook). A VRM sysfs demand follows the inter-read gap down to about 20 ms, including the first read after idle. Consecutive sample failures back off (about 4 Hz, then 1 Hz, 0.5 Hz, cap 8 s) so a wedged VR does not hold `EC_io_lock` at 4 Hz forever. Fast demand still shares that lock with fans and temps. VRM sysfs only samples the VR, not the full fan/temp scan. `vrm_cpu` returns VOUT, IOUT, and POUT in one read. Software hist for IOUT/POUT ignores a negative millisi sample.
+Background PAGE samples stay at 1 Hz (fan/temp hook). A VRM sysfs demand follows the inter-read gap down to about 20 ms, including the first read after idle. Consecutive sample failures back off (about 4 Hz, then 1 Hz, 0.5 Hz, cap 8 s) so a wedged VR does not hold `EC_io_lock` at 4 Hz forever. Fast demand still shares that lock with fans and temps. VRM sysfs only samples the VR, not the full fan/temp scan. `vrm_cpu` returns VOUT, IOUT, and POUT in one read. Software hist for IOUT/IIN/POUT/PIN ignores a negative millisi sample. POUT hist is `power1_input_lowest` / `power1_input_highest` and PIN hist is `power3_input_lowest` / `power3_input_highest` so `sensors` prints `lowest` then `highest`. `power*_min` / `power*_max` would print max-then-min, and power has no `low` label. VRM MOS hist is `temp3_min` / `temp3_max` (`sensors` prints `low` / `high`). VRM CPU TEMP stays `temp20_min` / `temp20_max`. Efficiency is not a register. It is `POUT/PIN`, capped at 100%, published as `humidity1` because that is the percent channel `sensors` knows. `sensors` prints it with a `%RH` suffix and does not print humidity min/max. Either power at or below zero hides the value.
 
 GT / iGPU is PMBus PAGE 1. Usually idle if you have a discrete GPU:
 
@@ -82,7 +88,7 @@ sudo modprobe -r nct6687
 sudo modprobe nct6687 vrm=1 vrm_gt=1
 ```
 
-That adds `in22`, `in23`, `curr2`, `power2`, `temp21`.
+That adds `in22`, `in23`, `curr2`, `curr4`, `power2`, `power4`, `humidity2`, `temp21`.
 
 ### Persist (Arch)
 

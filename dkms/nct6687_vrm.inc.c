@@ -41,6 +41,34 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_vout_mode_valid[0] = false;
     data->vrm_vout_mode_valid[1] = false;
     memset(data->vrm_rail, 0, sizeof(data->vrm_rail));
+    data->vrm_mos_hist_init = false;
+    data->vrm_mos_min = 0;
+    data->vrm_mos_max = 0;
+}
+
+/* nct6687_temp_label[2] is "VRM MOS" → hwmon temp3. r257 stores only the
+ * current reading; min/max here are software hist so sensors prints low/high.
+ */
+#define NCT_VRM_MOS_CH 2
+#define NCT_VRM_MOS_NR 100
+
+static bool nct_vrm_mos_present(void)
+{
+    return NCT6687_TEMP_ENABLED(NCT_VRM_MOS_CH) &&
+        nct6687_temp_label[NCT_VRM_MOS_CH] &&
+        !strcmp(nct6687_temp_label[NCT_VRM_MOS_CH], "VRM MOS");
+}
+
+static void nct_vrm_note_mos(struct nct6687_data* data)
+{
+    long t;
+
+    if (!nct_vrm_mos_present())
+        return;
+    t = data->temperature[NCT_VRM_MOS_CH];
+    nct_vrm_hist_point(&data->vrm_mos_min, &data->vrm_mos_max, t,
+        !data->vrm_mos_hist_init);
+    data->vrm_mos_hist_init = true;
 }
 
 static int nct_vrm_bus_recover(struct nct6687_data* data)
@@ -61,6 +89,11 @@ static void nct6687_update_vrm(struct nct6687_data* data)
 
     if (!data->vrm_enabled)
         return;
+
+    /* EC temp was refreshed by update_device, or is the probe sample.
+     * Demand reads re-apply that cached value; they do not invent a new one.
+     */
+    nct_vrm_note_mos(data);
 
     /*
      * Rate-limit even when invalid: a wedged VR/mux must not be hammered at
@@ -196,12 +229,18 @@ enum nct_vrm_ch {
     NCT_VRM_CPU_VOUT,
     NCT_VRM_CPU_VIN,
     NCT_VRM_CPU_IOUT,
+    NCT_VRM_CPU_IIN,
     NCT_VRM_CPU_POUT,
+    NCT_VRM_CPU_PIN,
+    NCT_VRM_CPU_EFF,
     NCT_VRM_CPU_TEMP,
     NCT_VRM_GT_VOUT,
     NCT_VRM_GT_VIN,
     NCT_VRM_GT_IOUT,
+    NCT_VRM_GT_IIN,
     NCT_VRM_GT_POUT,
+    NCT_VRM_GT_PIN,
+    NCT_VRM_GT_EFF,
     NCT_VRM_GT_TEMP,
 };
 
@@ -215,12 +254,18 @@ static const struct nct_vrm_chan nct_vrm_chans[] = {
     [NCT_VRM_CPU_VOUT] = { "VRM CPU VOUT", 0, NCT_VRM_VOUT },
     [NCT_VRM_CPU_VIN] = { "VRM CPU VIN", 0, NCT_VRM_VIN },
     [NCT_VRM_CPU_IOUT] = { "VRM CPU IOUT", 0, NCT_VRM_IOUT },
+    [NCT_VRM_CPU_IIN] = { "VRM CPU IIN", 0, NCT_VRM_IIN },
     [NCT_VRM_CPU_POUT] = { "VRM CPU POUT", 0, NCT_VRM_POUT },
+    [NCT_VRM_CPU_PIN] = { "VRM CPU PIN", 0, NCT_VRM_PIN },
+    [NCT_VRM_CPU_EFF] = { "VRM CPU Efficiency", 0, NCT_VRM_EFF },
     [NCT_VRM_CPU_TEMP] = { "VRM CPU TEMP", 0, NCT_VRM_TEMP },
     [NCT_VRM_GT_VOUT] = { "VRM GT VOUT", 1, NCT_VRM_VOUT },
     [NCT_VRM_GT_VIN] = { "VRM GT VIN", 1, NCT_VRM_VIN },
     [NCT_VRM_GT_IOUT] = { "VRM GT IOUT", 1, NCT_VRM_IOUT },
+    [NCT_VRM_GT_IIN] = { "VRM GT IIN", 1, NCT_VRM_IIN },
     [NCT_VRM_GT_POUT] = { "VRM GT POUT", 1, NCT_VRM_POUT },
+    [NCT_VRM_GT_PIN] = { "VRM GT PIN", 1, NCT_VRM_PIN },
+    [NCT_VRM_GT_EFF] = { "VRM GT Efficiency", 1, NCT_VRM_EFF },
     [NCT_VRM_GT_TEMP] = { "VRM GT TEMP", 1, NCT_VRM_TEMP },
 };
 
@@ -241,6 +286,18 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
 
     data = nct_vrm_touch_and_update(dev);
     r = &data->vrm_rail[ch->page];
+
+    /* humidity*_input. sensors prints this as percent and appends %RH. */
+    if (ch->metric == NCT_VRM_EFF) {
+        if (sattr->index != NCT_VRM_INPUT)
+            return -EINVAL;
+        if (!r->valid)
+            return -ENODATA;
+        val = nct_vrm_efficiency_pcm(r->val[NCT_VRM_POUT], r->val[NCT_VRM_PIN]);
+        if (val <= 0)
+            return -ENODATA;
+        return sprintf(buf, "%ld\n", val);
+    }
 
     switch (sattr->index) {
     case NCT_VRM_INPUT:
@@ -281,10 +338,23 @@ NCT_VRM_ATTR(curr1_input, NCT_VRM_CPU_IOUT, NCT_VRM_INPUT);
 NCT_VRM_ATTR(curr1_label, NCT_VRM_CPU_IOUT, NCT_VRM_LABEL);
 NCT_VRM_ATTR(curr1_min, NCT_VRM_CPU_IOUT, NCT_VRM_MIN);
 NCT_VRM_ATTR(curr1_max, NCT_VRM_CPU_IOUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(curr3_input, NCT_VRM_CPU_IIN, NCT_VRM_INPUT);
+NCT_VRM_ATTR(curr3_label, NCT_VRM_CPU_IIN, NCT_VRM_LABEL);
+NCT_VRM_ATTR(curr3_min, NCT_VRM_CPU_IIN, NCT_VRM_MIN);
+NCT_VRM_ATTR(curr3_max, NCT_VRM_CPU_IIN, NCT_VRM_MAX);
 NCT_VRM_ATTR(power1_input, NCT_VRM_CPU_POUT, NCT_VRM_INPUT);
 NCT_VRM_ATTR(power1_label, NCT_VRM_CPU_POUT, NCT_VRM_LABEL);
-NCT_VRM_ATTR(power1_min, NCT_VRM_CPU_POUT, NCT_VRM_MIN);
-NCT_VRM_ATTR(power1_max, NCT_VRM_CPU_POUT, NCT_VRM_MAX);
+/* input_lowest/highest: sensors prints those before power min/max, and
+ * power min/max print max-then-min. There is no power "low" label.
+ */
+NCT_VRM_ATTR(power1_input_lowest, NCT_VRM_CPU_POUT, NCT_VRM_MIN);
+NCT_VRM_ATTR(power1_input_highest, NCT_VRM_CPU_POUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(power3_input, NCT_VRM_CPU_PIN, NCT_VRM_INPUT);
+NCT_VRM_ATTR(power3_label, NCT_VRM_CPU_PIN, NCT_VRM_LABEL);
+NCT_VRM_ATTR(power3_input_lowest, NCT_VRM_CPU_PIN, NCT_VRM_MIN);
+NCT_VRM_ATTR(power3_input_highest, NCT_VRM_CPU_PIN, NCT_VRM_MAX);
+NCT_VRM_ATTR(humidity1_input, NCT_VRM_CPU_EFF, NCT_VRM_INPUT);
+NCT_VRM_ATTR(humidity1_label, NCT_VRM_CPU_EFF, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp20_input, NCT_VRM_CPU_TEMP, NCT_VRM_INPUT);
 NCT_VRM_ATTR(temp20_label, NCT_VRM_CPU_TEMP, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp20_min, NCT_VRM_CPU_TEMP, NCT_VRM_MIN);
@@ -301,15 +371,42 @@ NCT_VRM_ATTR(curr2_input, NCT_VRM_GT_IOUT, NCT_VRM_INPUT);
 NCT_VRM_ATTR(curr2_label, NCT_VRM_GT_IOUT, NCT_VRM_LABEL);
 NCT_VRM_ATTR(curr2_min, NCT_VRM_GT_IOUT, NCT_VRM_MIN);
 NCT_VRM_ATTR(curr2_max, NCT_VRM_GT_IOUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(curr4_input, NCT_VRM_GT_IIN, NCT_VRM_INPUT);
+NCT_VRM_ATTR(curr4_label, NCT_VRM_GT_IIN, NCT_VRM_LABEL);
+NCT_VRM_ATTR(curr4_min, NCT_VRM_GT_IIN, NCT_VRM_MIN);
+NCT_VRM_ATTR(curr4_max, NCT_VRM_GT_IIN, NCT_VRM_MAX);
 NCT_VRM_ATTR(power2_input, NCT_VRM_GT_POUT, NCT_VRM_INPUT);
 NCT_VRM_ATTR(power2_label, NCT_VRM_GT_POUT, NCT_VRM_LABEL);
-NCT_VRM_ATTR(power2_min, NCT_VRM_GT_POUT, NCT_VRM_MIN);
-NCT_VRM_ATTR(power2_max, NCT_VRM_GT_POUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(power2_input_lowest, NCT_VRM_GT_POUT, NCT_VRM_MIN);
+NCT_VRM_ATTR(power2_input_highest, NCT_VRM_GT_POUT, NCT_VRM_MAX);
+NCT_VRM_ATTR(power4_input, NCT_VRM_GT_PIN, NCT_VRM_INPUT);
+NCT_VRM_ATTR(power4_label, NCT_VRM_GT_PIN, NCT_VRM_LABEL);
+NCT_VRM_ATTR(power4_input_lowest, NCT_VRM_GT_PIN, NCT_VRM_MIN);
+NCT_VRM_ATTR(power4_input_highest, NCT_VRM_GT_PIN, NCT_VRM_MAX);
+NCT_VRM_ATTR(humidity2_input, NCT_VRM_GT_EFF, NCT_VRM_INPUT);
+NCT_VRM_ATTR(humidity2_label, NCT_VRM_GT_EFF, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp21_input, NCT_VRM_GT_TEMP, NCT_VRM_INPUT);
 NCT_VRM_ATTR(temp21_label, NCT_VRM_GT_TEMP, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp21_min, NCT_VRM_GT_TEMP, NCT_VRM_MIN);
 NCT_VRM_ATTR(temp21_max, NCT_VRM_GT_TEMP, NCT_VRM_MAX);
 
+static struct nct6687_data* nct6687_update_device(struct device* dev);
+
+static ssize_t nct_vrm_mos_show(struct device* dev, struct device_attribute* attr, char* buf)
+{
+    struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
+    struct nct6687_data* data = nct6687_update_device(dev);
+
+    if (!data->vrm_mos_hist_init)
+        return -ENODATA;
+    return sprintf(buf, "%ld\n",
+        sattr->index == NCT_VRM_MAX ? data->vrm_mos_max : data->vrm_mos_min);
+}
+
+static SENSOR_DEVICE_ATTR_2(temp3_min, 0444, nct_vrm_mos_show, NULL,
+    NCT_VRM_MOS_NR, NCT_VRM_MIN);
+static SENSOR_DEVICE_ATTR_2(temp3_max, 0444, nct_vrm_mos_show, NULL,
+    NCT_VRM_MOS_NR, NCT_VRM_MAX);
 
 static umode_t nct6687_vrm_attr_is_visible(struct kobject* kobj,
     struct attribute* attr, int idx)
@@ -319,6 +416,8 @@ static umode_t nct6687_vrm_attr_is_visible(struct kobject* kobj,
 
     (void)kobj;
     (void)idx;
+    if (sattr->nr == NCT_VRM_MOS_NR)
+        return nct_vrm_mos_present() ? 0444 : 0;
     if (sattr->nr >= ARRAY_SIZE(nct_vrm_chans))
         return 0444;
     if (nct_vrm_chans[sattr->nr].page == 1 && !vrm_gt)
@@ -340,14 +439,26 @@ static struct attribute* nct6687_vrm_attrs[] = {
     &sensor_dev_attr_curr1_label.dev_attr.attr,
     &sensor_dev_attr_curr1_min.dev_attr.attr,
     &sensor_dev_attr_curr1_max.dev_attr.attr,
+    &sensor_dev_attr_curr3_input.dev_attr.attr,
+    &sensor_dev_attr_curr3_label.dev_attr.attr,
+    &sensor_dev_attr_curr3_min.dev_attr.attr,
+    &sensor_dev_attr_curr3_max.dev_attr.attr,
     &sensor_dev_attr_power1_input.dev_attr.attr,
     &sensor_dev_attr_power1_label.dev_attr.attr,
-    &sensor_dev_attr_power1_min.dev_attr.attr,
-    &sensor_dev_attr_power1_max.dev_attr.attr,
+    &sensor_dev_attr_power1_input_lowest.dev_attr.attr,
+    &sensor_dev_attr_power1_input_highest.dev_attr.attr,
+    &sensor_dev_attr_power3_input.dev_attr.attr,
+    &sensor_dev_attr_power3_label.dev_attr.attr,
+    &sensor_dev_attr_power3_input_lowest.dev_attr.attr,
+    &sensor_dev_attr_power3_input_highest.dev_attr.attr,
+    &sensor_dev_attr_humidity1_input.dev_attr.attr,
+    &sensor_dev_attr_humidity1_label.dev_attr.attr,
     &sensor_dev_attr_temp20_input.dev_attr.attr,
     &sensor_dev_attr_temp20_label.dev_attr.attr,
     &sensor_dev_attr_temp20_min.dev_attr.attr,
     &sensor_dev_attr_temp20_max.dev_attr.attr,
+    &sensor_dev_attr_temp3_min.dev_attr.attr,
+    &sensor_dev_attr_temp3_max.dev_attr.attr,
     &sensor_dev_attr_in22_input.dev_attr.attr,
     &sensor_dev_attr_in22_label.dev_attr.attr,
     &sensor_dev_attr_in22_min.dev_attr.attr,
@@ -360,10 +471,20 @@ static struct attribute* nct6687_vrm_attrs[] = {
     &sensor_dev_attr_curr2_label.dev_attr.attr,
     &sensor_dev_attr_curr2_min.dev_attr.attr,
     &sensor_dev_attr_curr2_max.dev_attr.attr,
+    &sensor_dev_attr_curr4_input.dev_attr.attr,
+    &sensor_dev_attr_curr4_label.dev_attr.attr,
+    &sensor_dev_attr_curr4_min.dev_attr.attr,
+    &sensor_dev_attr_curr4_max.dev_attr.attr,
     &sensor_dev_attr_power2_input.dev_attr.attr,
     &sensor_dev_attr_power2_label.dev_attr.attr,
-    &sensor_dev_attr_power2_min.dev_attr.attr,
-    &sensor_dev_attr_power2_max.dev_attr.attr,
+    &sensor_dev_attr_power2_input_lowest.dev_attr.attr,
+    &sensor_dev_attr_power2_input_highest.dev_attr.attr,
+    &sensor_dev_attr_power4_input.dev_attr.attr,
+    &sensor_dev_attr_power4_label.dev_attr.attr,
+    &sensor_dev_attr_power4_input_lowest.dev_attr.attr,
+    &sensor_dev_attr_power4_input_highest.dev_attr.attr,
+    &sensor_dev_attr_humidity2_input.dev_attr.attr,
+    &sensor_dev_attr_humidity2_label.dev_attr.attr,
     &sensor_dev_attr_temp21_input.dev_attr.attr,
     &sensor_dev_attr_temp21_label.dev_attr.attr,
     &sensor_dev_attr_temp21_min.dev_attr.attr,
