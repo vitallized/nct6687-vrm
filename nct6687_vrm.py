@@ -532,7 +532,7 @@ def format_sensors(s: VrmSample, name: str | None = None) -> str:
         f"VRM {rail} Power:   {s.pout_w:8.3f} W  (RAW 0x{s.pout_raw:04x})",
         f"VRM {rail} PIN:     {s.pin_w:8.3f} W  (READ_PIN 1W; RAW 0x{s.pin_raw:04x})",
         (
-            f"VRM {rail} Efficiency: {s.eff_pcm / 1000.0:5.1f} %"
+            f"VRM {rail} Efficiency: {(s.eff_pcm + 500) // 1000:3d}%"
             if s.eff_pcm > 0
             else f"VRM {rail} Efficiency:   n/a"
         ),

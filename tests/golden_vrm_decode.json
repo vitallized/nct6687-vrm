@@ -86,6 +86,20 @@
       "note": "POUT or PIN <= 0: HWiNFO omits VRM Efficiency."
     },
     {
+      "name": "efficiency_pwm_59_percent",
+      "fn": "efficiency_pwm",
+      "args": [36000000, 61000000],
+      "expect": 118,
+      "note": "59% → pwm 118. sensors 3.6.2 prints count/2, so 118 is 59%."
+    },
+    {
+      "name": "efficiency_pwm_100_percent",
+      "fn": "efficiency_pwm",
+      "args": [33000000, 29000000],
+      "expect": 200,
+      "note": "Capped 100% is pwm 200. 255 would print as 128% because the scale is 2, not 2.55."
+    },
+    {
       "name": "clamp_exp_high",
       "fn": "clamp_exp",
       "args": [20],

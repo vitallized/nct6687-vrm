@@ -23,6 +23,7 @@ static void usage(void)
 		"       vrm_decode decode_iin_ma RAW\n"
 		"       vrm_decode decode_pin_uw RAW\n"
 		"       vrm_decode efficiency_pcm POUT_UW PIN_UW\n"
+		"       vrm_decode efficiency_pwm POUT_UW PIN_UW\n"
 		"       vrm_decode iout_from_pv_ma P_MW V_MV\n"
 		"       vrm_decode should_sample VALID DEMANDED LAST_READ_SET GAP AGE HZ FLOOR FAILS\n"
 		"       vrm_decode fail_interval FAILS HZ\n"
@@ -111,6 +112,12 @@ int main(int argc, char** argv)
 	if (!strcmp(fn, "efficiency_pcm") && argc == 4) {
 		printf("%ld\n",
 			nct_vrm_efficiency_pcm(strtol(argv[2], NULL, 0),
+				strtol(argv[3], NULL, 0)));
+		return 0;
+	}
+	if (!strcmp(fn, "efficiency_pwm") && argc == 4) {
+		printf("%ld\n",
+			nct_vrm_efficiency_pwm(strtol(argv[2], NULL, 0),
 				strtol(argv[3], NULL, 0)));
 		return 0;
 	}

@@ -37,7 +37,7 @@ enum nct_vrm_metric {
 };
 _Static_assert(NCT_VRM_PIN + 1 == NCT_VRM_NMETRIC, "NCT_VRM_NMETRIC");
 
-/* Not a val[] slot. POUT/PIN ratio, humidity milli-percent at show time. */
+/* Not a val[] slot. POUT/PIN ratio, shown through pwm9 (100% = 200). */
 #define NCT_VRM_EFF 255
 
 static int nct_vrm_clamp_exp(int exp)
@@ -120,8 +120,7 @@ static long nct_vrm_decode_pin_uw(u16 pin)
 
 /*
  * HWiNFO 8.54 "VRM Efficiency": POUT/PIN*100, then min(100).
- * Milli-percent so humidity*_input prints as percent (libsensors /1000).
- * Either power <= 0 → 0, and the show path returns no data.
+ * Milli-percent. Either power <= 0 → 0.
  * pout >= pin is the cap, and it also keeps pout*100000 inside signed long.
  */
 static long nct_vrm_efficiency_pcm(long pout_uw, long pin_uw)
@@ -131,6 +130,26 @@ static long nct_vrm_efficiency_pcm(long pout_uw, long pin_uw)
 	if (pout_uw >= pin_uw)
 		return 100000L;
 	return (pout_uw * 100000L) / pin_uw;
+}
+
+/*
+ * pwm count for sensors 3.6.2. get_type_scaling() returns int, so the
+ * 2.55 pwm factor is truncated to 2 and sensors prints count/2 as "%".
+ * 100% is 200. 255 would print as 128%.
+ */
+static long nct_vrm_efficiency_pwm(long pout_uw, long pin_uw)
+{
+	long pcm = nct_vrm_efficiency_pcm(pout_uw, pin_uw);
+	long pct;
+
+	if (pcm <= 0)
+		return 0;
+	pct = (pcm + 500L) / 1000L;
+	if (pct <= 0)
+		return 0;
+	if (pct > 100L)
+		pct = 100L;
+	return pct * 2L;
 }
 
 #ifdef NCT_VRM_DECODE_HOST
