@@ -80,6 +80,19 @@ def efficiency_pcm(pout_uw: int, pin_uw: int) -> int:
     return (pout_uw * 100_000) // pin_uw
 
 
+def efficiency_pwm(pout_uw: int, pin_uw: int) -> int:
+    """pwm count. sensors 3.6.2 prints count/2 as a whole percent. 100% is 200."""
+    pcm = efficiency_pcm(pout_uw, pin_uw)
+    if pcm <= 0:
+        return 0
+    pct = (pcm + 500) // 1000
+    if pct <= 0:
+        return 0
+    if pct > 100:
+        pct = 100
+    return pct * 2
+
+
 def iout_from_pv_ma(p_mw: int, v_mv: int) -> int:
     """IOUT mA from POUT mW and VOUT mV. Toward-zero like C `/`."""
     if v_mv == 0:

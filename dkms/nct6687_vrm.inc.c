@@ -240,7 +240,6 @@ enum nct_vrm_ch {
     NCT_VRM_GT_IIN,
     NCT_VRM_GT_POUT,
     NCT_VRM_GT_PIN,
-    NCT_VRM_GT_EFF,
     NCT_VRM_GT_TEMP,
 };
 
@@ -265,7 +264,6 @@ static const struct nct_vrm_chan nct_vrm_chans[] = {
     [NCT_VRM_GT_IIN] = { "VRM GT IIN", 1, NCT_VRM_IIN },
     [NCT_VRM_GT_POUT] = { "VRM GT POUT", 1, NCT_VRM_POUT },
     [NCT_VRM_GT_PIN] = { "VRM GT PIN", 1, NCT_VRM_PIN },
-    [NCT_VRM_GT_EFF] = { "VRM GT Efficiency", 1, NCT_VRM_EFF },
     [NCT_VRM_GT_TEMP] = { "VRM GT TEMP", 1, NCT_VRM_TEMP },
 };
 
@@ -287,13 +285,17 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
     data = nct_vrm_touch_and_update(dev);
     r = &data->vrm_rail[ch->page];
 
-    /* humidity*_input. sensors prints this as percent and appends %RH. */
+    /* pwm9, read-only, no _enable. This sensors divides the count by 2
+     * and prints "%", so 100% is 200. pwm1–pwm8 are the fan duties.
+     * libsensors 3.6.2 keeps 4 chars of a pwm name, so pwm10 would alias
+     * pwm1. No GT efficiency channel.
+     */
     if (ch->metric == NCT_VRM_EFF) {
         if (sattr->index != NCT_VRM_INPUT)
             return -EINVAL;
         if (!r->valid)
             return -ENODATA;
-        val = nct_vrm_efficiency_pcm(r->val[NCT_VRM_POUT], r->val[NCT_VRM_PIN]);
+        val = nct_vrm_efficiency_pwm(r->val[NCT_VRM_POUT], r->val[NCT_VRM_PIN]);
         if (val <= 0)
             return -ENODATA;
         return sprintf(buf, "%ld\n", val);
@@ -353,8 +355,8 @@ NCT_VRM_ATTR(power3_input, NCT_VRM_CPU_PIN, NCT_VRM_INPUT);
 NCT_VRM_ATTR(power3_label, NCT_VRM_CPU_PIN, NCT_VRM_LABEL);
 NCT_VRM_ATTR(power3_input_lowest, NCT_VRM_CPU_PIN, NCT_VRM_MIN);
 NCT_VRM_ATTR(power3_input_highest, NCT_VRM_CPU_PIN, NCT_VRM_MAX);
-NCT_VRM_ATTR(humidity1_input, NCT_VRM_CPU_EFF, NCT_VRM_INPUT);
-NCT_VRM_ATTR(humidity1_label, NCT_VRM_CPU_EFF, NCT_VRM_LABEL);
+NCT_VRM_ATTR(pwm9, NCT_VRM_CPU_EFF, NCT_VRM_INPUT);
+NCT_VRM_ATTR(pwm9_label, NCT_VRM_CPU_EFF, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp20_input, NCT_VRM_CPU_TEMP, NCT_VRM_INPUT);
 NCT_VRM_ATTR(temp20_label, NCT_VRM_CPU_TEMP, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp20_min, NCT_VRM_CPU_TEMP, NCT_VRM_MIN);
@@ -383,8 +385,6 @@ NCT_VRM_ATTR(power4_input, NCT_VRM_GT_PIN, NCT_VRM_INPUT);
 NCT_VRM_ATTR(power4_label, NCT_VRM_GT_PIN, NCT_VRM_LABEL);
 NCT_VRM_ATTR(power4_input_lowest, NCT_VRM_GT_PIN, NCT_VRM_MIN);
 NCT_VRM_ATTR(power4_input_highest, NCT_VRM_GT_PIN, NCT_VRM_MAX);
-NCT_VRM_ATTR(humidity2_input, NCT_VRM_GT_EFF, NCT_VRM_INPUT);
-NCT_VRM_ATTR(humidity2_label, NCT_VRM_GT_EFF, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp21_input, NCT_VRM_GT_TEMP, NCT_VRM_INPUT);
 NCT_VRM_ATTR(temp21_label, NCT_VRM_GT_TEMP, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp21_min, NCT_VRM_GT_TEMP, NCT_VRM_MIN);
@@ -451,8 +451,8 @@ static struct attribute* nct6687_vrm_attrs[] = {
     &sensor_dev_attr_power3_label.dev_attr.attr,
     &sensor_dev_attr_power3_input_lowest.dev_attr.attr,
     &sensor_dev_attr_power3_input_highest.dev_attr.attr,
-    &sensor_dev_attr_humidity1_input.dev_attr.attr,
-    &sensor_dev_attr_humidity1_label.dev_attr.attr,
+    &sensor_dev_attr_pwm9.dev_attr.attr,
+    &sensor_dev_attr_pwm9_label.dev_attr.attr,
     &sensor_dev_attr_temp20_input.dev_attr.attr,
     &sensor_dev_attr_temp20_label.dev_attr.attr,
     &sensor_dev_attr_temp20_min.dev_attr.attr,
@@ -483,8 +483,6 @@ static struct attribute* nct6687_vrm_attrs[] = {
     &sensor_dev_attr_power4_label.dev_attr.attr,
     &sensor_dev_attr_power4_input_lowest.dev_attr.attr,
     &sensor_dev_attr_power4_input_highest.dev_attr.attr,
-    &sensor_dev_attr_humidity2_input.dev_attr.attr,
-    &sensor_dev_attr_humidity2_label.dev_attr.attr,
     &sensor_dev_attr_temp21_input.dev_attr.attr,
     &sensor_dev_attr_temp21_label.dev_attr.attr,
     &sensor_dev_attr_temp21_min.dev_attr.attr,

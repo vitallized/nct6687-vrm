@@ -139,7 +139,9 @@ def test_sensors_prints_pout_low_then_high_and_mos_hist() -> None:
     assert "power1_min" not in text
     assert "power3_min" not in text
     assert "power1_max" not in text
-    assert "humidity1_input" in text and "humidity1_label" in text
-    assert "humidity1_min" not in text
+    assert "pwm9_label" in text
+    assert "sensor_dev_attr_pwm10" not in text
+    assert "humidity1" not in text
+    assert "pwm9_enable" not in text
     assert "temp3_min" in text and "temp3_max" in text
     assert "temp20_min" in text and "temp20_max" in text
