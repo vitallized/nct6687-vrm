@@ -50,7 +50,7 @@ static void nct_vrm_ec_unlock(struct nct6687_data* data)
 
 static void nct_vrm_warn_recover(void)
 {
-    pr_warn_ratelimited("nct6687: VRM recover failed\n");
+    pr_warn_ratelimited("VRM recover failed\n");
 }
 
 static void nct_vrm_note_negative(int metric, long val)
@@ -76,7 +76,7 @@ static void nct_vrm_note_negative(int metric, long val)
         unit = "uW";
         break;
     }
-    pr_warn_ratelimited("nct6687: VRM %s %ld %s not published\n", what, val, unit);
+    pr_warn_ratelimited("VRM %s %ld %s not published\n", what, val, unit);
 }
 
 #include "nct6687_vrm_demand.h"
