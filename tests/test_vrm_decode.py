@@ -1,4 +1,4 @@
-"""Hardware-free golden tests: Python and host-compiled C must match."""
+"""Hardware-free golden tests: host-compiled C millisi decode."""
 
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
-import nct6687_vrm_decode as py_decode  # noqa: E402
 
 GOLDEN = json.loads((Path(__file__).with_name("golden_vrm_decode.json")).read_text())
 CASES = GOLDEN["cases"]
@@ -34,12 +32,6 @@ def c_decode_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
         ]
     )
     return out
-
-
-@pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
-def test_python_matches_golden(case: dict) -> None:
-    fn = getattr(py_decode, case["fn"])
-    assert fn(*case["args"]) == case["expect"]
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])

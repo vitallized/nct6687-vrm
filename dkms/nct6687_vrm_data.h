@@ -13,6 +13,13 @@
 	unsigned long vrm_last_read;
 	unsigned long vrm_read_gap;
 	unsigned vrm_fail_count;
+	/* PAGE 1 only. A GT miss backs off without slowing the CPU rail. */
+	unsigned vrm_gt_fails;
+	unsigned long vrm_gt_fail_at;
+	/* Pre-arm 0x61/0x62 kept when a checked restore does not land. */
+	bool vrm_mux_hold;
+	u8 vrm_mux_cfg;
+	u8 vrm_mux_baud;
 	int vrm_smbus_page;
 	u8 vrm_vout_mode_cache[2];
 	bool vrm_vout_mode_valid[2];
@@ -30,5 +37,12 @@
 	} vrm_rail[2];
 	/* Stock EC thermistor "VRM MOS" (temp3). Not a PAGE sample. */
 	bool vrm_mos_hist_init;
+	unsigned long vrm_mos_read_at;
 	long vrm_mos_min;
 	long vrm_mos_max;
+	/* READ_TEMPERATURE_2 (0x8E). Global controller die, not a PAGE slot. */
+	bool vrm_ctrl_valid;
+	bool vrm_ctrl_hist_init;
+	long vrm_ctrl_mc;
+	long vrm_ctrl_min;
+	long vrm_ctrl_max;

@@ -1,7 +1,8 @@
 /*
  * Host compile of dkms/nct6687_vrm_decode.h — no linux headers, no .ko.
  * pytest drives this against tests/golden_vrm_decode.json, and drives the
- * rail slot (nct_vrm_rail_apply) through rail_seq.
+ * rail slot (nct_vrm_rail_apply) through rail_seq. attr_names prints the
+ * published hwmon filenames from tests/vrm_attr_names.h.
  *
  *   cc -Wall -Werror -DNCT_VRM_DECODE_HOST -o vrm_decode tests/vrm_decode.c
  */
@@ -9,8 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "vrm_attr_names.h"
+
 #define NCT_VRM_DECODE_HOST 1
-#include "../dkms/nct6687_vrm_decode.h"
+#include "../dkms/nct6687_vrm_hist.h"
 
 static void usage(void)
 {
@@ -24,10 +27,12 @@ static void usage(void)
 		"       vrm_decode decode_pin_uw RAW\n"
 		"       vrm_decode efficiency_pcm POUT_UW PIN_UW\n"
 		"       vrm_decode efficiency_pwm POUT_UW PIN_UW\n"
-		"       vrm_decode iout_from_pv_ma P_MW V_MV\n"
-		"       vrm_decode should_sample VALID DEMANDED LAST_READ_SET GAP AGE HZ FLOOR FAILS\n"
-		"       vrm_decode fail_interval FAILS HZ\n"
-		"       vrm_decode rail_seq VOUT,VIN,IOUT,POUT,TEMP,IIN,PIN...\n");
+		"       vrm_decode rail_seq VOUT,VIN,IOUT,POUT,TEMP,IIN,PIN...\n"
+		"       vrm_decode mos_seq MILLI_C...\n"
+		"       vrm_decode mos_milli WHOLE FRAC\n"
+		"       vrm_decode publish_hist LIVE READY\n"
+		"       vrm_decode ctrl_seq MILLI_C...\n"
+		"       vrm_decode attr_names\n");
 }
 
 /* Apply each PAGE sample to one fresh rail slot; print the slot. */
@@ -63,6 +68,47 @@ int main(int argc, char** argv)
 {
 	const char* fn;
 
+	if (argc == 2 && !strcmp(argv[1], "attr_names")) {
+		const char* const* name;
+
+		for (name = nct_vrm_published_attr_names; *name; name++)
+			printf("%s\n", *name);
+		return 0;
+	}
+	if (argc == 4 && !strcmp(argv[1], "publish_hist")) {
+		printf("%d\n", nct_vrm_publish_hist(atoi(argv[2]), atoi(argv[3])) ? 1 : 0);
+		return 0;
+	}
+	if (argc == 4 && !strcmp(argv[1], "mos_milli")) {
+		printf("%ld\n", nct_vrm_mos_milli((unsigned)strtoul(argv[2], NULL, 0),
+			(unsigned)strtoul(argv[3], NULL, 0)));
+		return 0;
+	}
+	if (argc >= 2 && !strcmp(argv[1], "ctrl_seq")) {
+		bool valid = false, init = false;
+		long cur = 0, min = 0, max = 0;
+		int i;
+
+		for (i = 2; i < argc; i++)
+			nct_vrm_ctrl_note(&valid, &init, &cur, &min, &max,
+				strtol(argv[i], NULL, 0));
+		printf("valid %d\ncur %ld\nmin %ld\nmax %ld\n",
+			valid ? 1 : 0, cur, min, max);
+		return 0;
+	}
+	if (argc >= 2 && !strcmp(argv[1], "mos_seq")) {
+		bool init = false;
+		long min = 0, max = 0;
+		int i;
+
+		for (i = 2; i < argc; i++)
+			nct_vrm_mos_note(&init, &min, &max, strtol(argv[i], NULL, 0));
+		printf("init %d\nmin %ld\nmax %ld\n",
+			nct_vrm_mos_ready(init) ? 1 : 0,
+			nct_vrm_mos_value(min, max, false),
+			nct_vrm_mos_value(min, max, true));
+		return 0;
+	}
 	if (argc >= 2 && !strcmp(argv[1], "rail_seq")) {
 		if (rail_seq(argc - 2, argv + 2)) {
 			usage();
@@ -119,32 +165,6 @@ int main(int argc, char** argv)
 		printf("%ld\n",
 			nct_vrm_efficiency_pwm(strtol(argv[2], NULL, 0),
 				strtol(argv[3], NULL, 0)));
-		return 0;
-	}
-	if (!strcmp(fn, "iout_from_pv_ma") && argc == 4) {
-		printf("%ld\n",
-			nct_vrm_iout_from_pv_ma(strtol(argv[2], NULL, 0),
-				strtol(argv[3], NULL, 0)));
-		return 0;
-	}
-	if (!strcmp(fn, "fail_interval") && argc == 4) {
-		printf("%lu\n",
-			nct_vrm_fail_interval((unsigned)strtoul(argv[2], NULL, 0),
-				strtoul(argv[3], NULL, 0)));
-		return 0;
-	}
-	if (!strcmp(fn, "should_sample") && argc == 10) {
-		bool sample = nct_vrm_should_sample(
-			!!strtol(argv[2], NULL, 0),
-			!!strtol(argv[3], NULL, 0),
-			!!strtol(argv[4], NULL, 0),
-			strtoul(argv[5], NULL, 0),
-			strtoul(argv[6], NULL, 0),
-			strtoul(argv[7], NULL, 0),
-			strtoul(argv[8], NULL, 0),
-			(unsigned)strtoul(argv[9], NULL, 0));
-
-		printf("%d\n", sample ? 1 : 0);
 		return 0;
 	}
 	usage();

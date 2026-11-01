@@ -3,7 +3,8 @@
 
 Bulk VRM logic lives in dkms/nct6687_vrm.inc.c (copied beside nct6687.c and
 #include'd), with raw→millisi math in nct6687_vrm_decode.h, the eSIO
-mailbox in nct6687_vrm_mailbox.h, and nct6687_data members in
+mailbox in nct6687_vrm_mailbox.h, the demand session in
+nct6687_vrm_demand.h, and nct6687_data members in
 nct6687_vrm_data.h. patches/vrm-splice.patch adds the small hooks to
 nct6687.c, so upstream driver churn rejects a few hunks — not a 500-line
 embedded blob.

@@ -129,19 +129,103 @@ def test_vout_vin_temp_still_latch_negative(c_decode_bin: Path) -> None:
     assert r["temp"] == (-5, True, -5, 40000)
 
 
-def test_sensors_prints_pout_low_then_high_and_mos_hist() -> None:
-    """sensors labels come from the sysfs name, not from the stored min/max."""
-    text = (Path(__file__).resolve().parents[1] / "dkms" / "nct6687_vrm.inc.c").read_text()
-    assert "power1_input_lowest" in text
-    assert "power1_input_highest" in text
-    assert "power3_input_lowest" in text
-    assert "power3_input_highest" in text
-    assert "power1_min" not in text
-    assert "power3_min" not in text
-    assert "power1_max" not in text
-    assert "pwm9_label" in text
-    assert "sensor_dev_attr_pwm10" not in text
-    assert "humidity1" not in text
-    assert "pwm9_enable" not in text
-    assert "temp3_min" in text and "temp3_max" in text
-    assert "temp20_min" in text and "temp20_max" in text
+def _mos(c_decode_bin: Path, *samples: int) -> tuple[int, int, int]:
+    out = subprocess.check_output(
+        [str(c_decode_bin), "mos_seq", *[str(s) for s in samples]], text=True
+    )
+    got = {}
+    for line in out.splitlines():
+        name, val = line.split()
+        got[name] = int(val)
+    return got["init"], got["min"], got["max"]
+
+
+def test_hist_hides_until_the_live_value_is_back(c_decode_bin: Path) -> None:
+    def published(live: str, ready: str) -> str:
+        return subprocess.check_output(
+            [str(c_decode_bin), "publish_hist", live, ready], text=True
+        ).strip()
+
+    assert published("0", "1") == "0"
+    assert published("1", "0") == "0"
+    assert published("1", "1") == "1"
+
+
+def test_mos_milli_matches_stock_half_degree(c_decode_bin: Path) -> None:
+    # 36 °C and the 0.5 °C fraction bit. Negative byte 0xFB is -5 °C.
+    assert subprocess.check_output(
+        [str(c_decode_bin), "mos_milli", "36", "0x80"], text=True
+    ).strip() == "36500"
+    assert subprocess.check_output(
+        [str(c_decode_bin), "mos_milli", "0xfb", "0"], text=True
+    ).strip() == "-5000"
+
+
+def test_ctrl_seeds_current_and_tracks_signed_temp(c_decode_bin: Path) -> None:
+    out = subprocess.check_output(
+        [str(c_decode_bin), "ctrl_seq", "35000", "37000", "34000"], text=True
+    )
+    got = {}
+    for line in out.splitlines():
+        key, val = line.split()
+        got[key] = int(val)
+    assert got == {"valid": 1, "cur": 34000, "min": 34000, "max": 37000}
+
+
+def test_mos_seeds_and_tracks_signed_temp(c_decode_bin: Path) -> None:
+    assert _mos(c_decode_bin, 38000, 40000, 37000) == (1, 37000, 40000)
+
+
+def test_mos_first_negative_seeds(c_decode_bin: Path) -> None:
+    assert _mos(c_decode_bin, -5000, 1000) == (1, -5000, 1000)
+
+
+# sensors prints these from the hwmon filename. Banned names are the ones
+# that would print in the wrong order, alias a fan pwm, or are not published.
+_PUBLISHED_NEED = (
+    "power1_input_lowest",
+    "power1_input_highest",
+    "power3_input_lowest",
+    "power3_input_highest",
+    "pwm9_label",
+    "temp3_min",
+    "temp3_max",
+    "temp20_min",
+    "temp20_max",
+)
+_PUBLISHED_BANNED = (
+    "power1_min",
+    "power1_max",
+    "power3_min",
+    "pwm10",
+    "humidity1",
+    "pwm9_enable",
+)
+
+
+def _attr_names(c_decode_bin: Path) -> set[str]:
+    """Published hwmon filenames from `vrm_decode attr_names`."""
+    lines = subprocess.check_output(
+        [str(c_decode_bin), "attr_names"], text=True
+    ).splitlines()
+    names = [line for line in lines if line]
+    assert names
+    assert len(names) == len(set(names))
+    return set(names)
+
+
+def test_sensors_prints_pout_low_then_high_and_mos_hist(c_decode_bin: Path) -> None:
+    """sensors labels come from the published hwmon filename, not stored min/max.
+
+    The name list is the host contract (`vrm_decode attr_names`). Rail and MOS
+    hist values stay on rail_seq and mos_seq.
+    """
+    names = _attr_names(c_decode_bin)
+    missing = [n for n in _PUBLISHED_NEED if n not in names]
+    assert not missing
+    banned = [
+        n
+        for n in names
+        if any(n == b or n.startswith(b + "_") for b in _PUBLISHED_BANNED)
+    ]
+    assert not banned

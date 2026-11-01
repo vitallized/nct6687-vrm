@@ -1,5 +1,5 @@
 {
-  "about": "PAGE sample PMBus traces. Kernel nct_vrm_sample_page (host C via tests/vrm_mailbox.c, real mailbox ops over a fake eSIO window) and Python _sample_page (FakeXfer) must both match. device: what the PMBus slave answers. Reading cmd 0x00 returns the last PAGE written unless page_readback overrides it. fail: nonzero status for one op kind and cmd. cache: PAGE + VOUT_MODE cache before/after (null = not cached). Raw words are hex strings; millisi are ints.",
+  "about": "PAGE sample PMBus traces. Kernel nct_vrm_sample_page (host C via tests/vrm_mailbox.c) and Python read_vrm (FakePorts) both run real mailbox ops over a fake eSIO window. device: what the PMBus slave answers. Reading cmd 0x00 returns the last PAGE written unless page_readback overrides it. fail: nonzero status for one op kind and cmd. cache: PAGE + VOUT_MODE cache before/after (null = not cached). Raw words are hex strings; millisi are ints.",
   "scenarios": [
     {
       "name": "cold_cache_page0_writes_page_and_reads_vout_mode",

@@ -4,8 +4,7 @@
  * values as tests/golden_vrm_decode.json. Host compile: tests/vrm_decode.c
  * with -DNCT_VRM_DECODE_HOST (no linux headers).
  *
- * Also owns the rail slot policy (nct_vrm_rail_apply): store one PAGE sample
- * and fold it into the software hist.
+ * Software hist lives in nct6687_vrm_hist.h.
  */
 #ifndef NCT6687_VRM_DECODE_H
 #define NCT6687_VRM_DECODE_H
@@ -150,133 +149,6 @@ static long nct_vrm_efficiency_pwm(long pout_uw, long pin_uw)
 	if (pct > 100L)
 		pct = 100L;
 	return pct * 2L;
-}
-
-#ifdef NCT_VRM_DECODE_HOST
-/* Not on the PAGE sample path. Toward-zero like C `/`. v_mv == 0 → 0. */
-static long nct_vrm_iout_from_pv_ma(long p_mw, long v_mv)
-{
-	if (!v_mv)
-		return 0;
-	return (p_mw * 1000L) / v_mv;
-}
-#endif
-
-/* Software min/max. first=true seeds both ends. */
-static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
-{
-	if (first) {
-		*min = *max = val;
-		return;
-	}
-	if (val < *min)
-		*min = val;
-	if (val > *max)
-		*max = val;
-}
-
-/*
- * IOUT, IIN (mA) and POUT, PIN (uW) use reject_neg. Live 2026-09-20 latched
- * -13900 mA because IOUT was P/V of a LINEAR11 POUT spike (-17000000 uW).
- * READ_IOUT Direct does not produce that spike; the guard stays.
- * VOUT/VIN/TEMP keep reject_neg=false.
- */
-static void nct_vrm_hist_add(long* min, long* max, bool* init, long val,
-	bool reject_neg)
-{
-	if (reject_neg && val < 0)
-		return;
-	nct_vrm_hist_point(min, max, val, !*init);
-	*init = true;
-}
-
-/*
- * Store one good PAGE sample in its rail slot and update the software hist.
- * VOUT/VIN/TEMP share hist_init and always take the signed value; IOUT/POUT
- * and IIN/PIN each seed on their own first non-negative sample.
- */
-static void nct_vrm_rail_apply(struct nct_vrm_rail* r,
-	const long sample[NCT_VRM_NMETRIC])
-{
-	bool first = !r->hist_init;
-
-	memcpy(r->val, sample, sizeof(r->val));
-	r->valid = true;
-	nct_vrm_hist_point(&r->min[NCT_VRM_VOUT], &r->max[NCT_VRM_VOUT],
-		sample[NCT_VRM_VOUT], first);
-	nct_vrm_hist_point(&r->min[NCT_VRM_VIN], &r->max[NCT_VRM_VIN],
-		sample[NCT_VRM_VIN], first);
-	nct_vrm_hist_add(&r->min[NCT_VRM_IOUT], &r->max[NCT_VRM_IOUT],
-		&r->iout_hist_init, sample[NCT_VRM_IOUT], true);
-	nct_vrm_hist_add(&r->min[NCT_VRM_POUT], &r->max[NCT_VRM_POUT],
-		&r->pout_hist_init, sample[NCT_VRM_POUT], true);
-	nct_vrm_hist_point(&r->min[NCT_VRM_TEMP], &r->max[NCT_VRM_TEMP],
-		sample[NCT_VRM_TEMP], first);
-	nct_vrm_hist_add(&r->min[NCT_VRM_IIN], &r->max[NCT_VRM_IIN],
-		&r->iin_hist_init, sample[NCT_VRM_IIN], true);
-	nct_vrm_hist_add(&r->min[NCT_VRM_PIN], &r->max[NCT_VRM_PIN],
-		&r->pin_hist_init, sample[NCT_VRM_PIN], true);
-	r->hist_init = true;
-}
-
-/* min/max for this metric has at least one sample. */
-static bool nct_vrm_rail_hist_ready(const struct nct_vrm_rail* r,
-	enum nct_vrm_metric m)
-{
-	if (m == NCT_VRM_IOUT)
-		return r->iout_hist_init;
-	if (m == NCT_VRM_POUT)
-		return r->pout_hist_init;
-	if (m == NCT_VRM_IIN)
-		return r->iin_hist_init;
-	if (m == NCT_VRM_PIN)
-		return r->pin_hist_init;
-	return r->hist_init;
-}
-
-/*
- * Retry interval after consecutive PAGE-sample failures. First fail stays
- * ~HZ/4; then HZ, 2*HZ, cap 8*HZ. fails==0 (never failed / just reset) uses
- * the first-fail slot so a cold !valid cache still retries at HZ/4.
- */
-static unsigned long nct_vrm_fail_interval(unsigned fails, unsigned long hz)
-{
-	if (fails <= 1)
-		return hz / 4;
-	if (fails == 2)
-		return hz;
-	if (fails == 3)
-		return 2 * hz;
-	return 8 * hz;
-}
-
-/*
- * PAGE sample due? valid / demanded / last_read / gap / cache age in jiffies.
- *
- * Live (2026-09-20): 1.2 s idle then vrm_cpu in 0.11 ms (stale). First demand
- * had gap>=HZ (aged last_read, or last_read==0 stored as HZ) so interval=HZ
- * and a recent fan update_vrm won the rate-limit. Demand after idle / first
- * read uses the 20 ms floor, not 1 Hz. Background stays 1 Hz; invalid uses
- * nct_vrm_fail_interval even on demand.
- */
-static bool nct_vrm_should_sample(bool valid, bool demanded, bool last_read_set,
-	unsigned long gap, unsigned long last_updated_age, unsigned long hz,
-	unsigned long floor, unsigned fails)
-{
-	unsigned long interval;
-
-	if (!valid)
-		interval = nct_vrm_fail_interval(fails, hz);
-	else if (!demanded)
-		interval = hz;
-	else if (!last_read_set || gap >= hz)
-		interval = floor;
-	else if (gap > floor)
-		interval = gap;
-	else
-		interval = floor;
-
-	return last_updated_age > interval;
 }
 
 #endif

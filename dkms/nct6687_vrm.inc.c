@@ -27,7 +27,33 @@ module_param(vrm_vout_exp, int, 0444);
 MODULE_PARM_DESC(vrm_vout_exp, "Fallback LINEAR16 exp if VOUT_MODE unknown (-16..15)");
 
 #include "nct6687_vrm_decode.h"
-#include "nct6687_vrm_mailbox.h"
+
+static unsigned long nct_vrm_now(void)
+{
+    return jiffies;
+}
+
+static void nct_vrm_ec_lock(struct nct6687_data* data)
+{
+    mutex_lock(&data->EC_io_lock);
+}
+
+static void nct_vrm_ec_unlock(struct nct6687_data* data)
+{
+    mutex_unlock(&data->EC_io_lock);
+}
+
+static void nct_vrm_warn_recover(void)
+{
+    pr_warn_ratelimited("nct6687: VRM recover failed\n");
+}
+
+#include "nct6687_vrm_demand.h"
+
+/* One session at a time. The demand flag is set and consumed under this lock
+ * so a second reader cannot clear it before the first has sampled.
+ */
+static DEFINE_MUTEX(nct_vrm_session_lock);
 
 static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
 {
@@ -37,13 +63,24 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_last_read = 0;
     data->vrm_read_gap = 0;
     data->vrm_fail_count = 0;
+    data->vrm_gt_fails = 0;
+    data->vrm_gt_fail_at = 0;
+    data->vrm_mux_hold = false;
+    data->vrm_mux_cfg = 0;
+    data->vrm_mux_baud = 0;
     data->vrm_smbus_page = -1;
     data->vrm_vout_mode_valid[0] = false;
     data->vrm_vout_mode_valid[1] = false;
     memset(data->vrm_rail, 0, sizeof(data->vrm_rail));
     data->vrm_mos_hist_init = false;
+    data->vrm_mos_read_at = 0;
     data->vrm_mos_min = 0;
     data->vrm_mos_max = 0;
+    data->vrm_ctrl_valid = false;
+    data->vrm_ctrl_hist_init = false;
+    data->vrm_ctrl_mc = 0;
+    data->vrm_ctrl_min = 0;
+    data->vrm_ctrl_max = 0;
 }
 
 /* nct6687_temp_label[2] is "VRM MOS" → hwmon temp3. r257 stores only the
@@ -51,6 +88,7 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
  */
 #define NCT_VRM_MOS_CH 2
 #define NCT_VRM_MOS_NR 100
+#define NCT_VRM_CTRL_NR 101
 
 static bool nct_vrm_mos_present(void)
 {
@@ -61,144 +99,83 @@ static bool nct_vrm_mos_present(void)
 
 static void nct_vrm_note_mos(struct nct6687_data* data)
 {
-    long t;
+    if (!nct_vrm_mos_present())
+        return;
+    nct_vrm_mos_note(&data->vrm_mos_hist_init, &data->vrm_mos_min,
+        &data->vrm_mos_max, data->temperature[NCT_VRM_MOS_CH]);
+}
+
+/* Two registers, same decode as nct6687_update_temperatures. Not the full scan. */
+static void nct_vrm_sample_mos(struct nct6687_data* data)
+{
+    unsigned long now, hold;
+    unsigned whole, frac;
 
     if (!nct_vrm_mos_present())
         return;
-    t = data->temperature[NCT_VRM_MOS_CH];
-    nct_vrm_hist_point(&data->vrm_mos_min, &data->vrm_mos_max, t,
-        !data->vrm_mos_hist_init);
-    data->vrm_mos_hist_init = true;
+    now = jiffies;
+    hold = msecs_to_jiffies(20);
+    if (!hold)
+        hold = 1;
+    if (data->vrm_mos_hist_init && time_before(now, data->vrm_mos_read_at + hold))
+        return;
+    whole = nct6687_read(data, NCT6687_REG_TEMP(NCT_VRM_MOS_CH));
+    frac = nct6687_read(data, NCT6687_REG_TEMP(NCT_VRM_MOS_CH) + 1);
+    data->temperature[NCT_VRM_MOS_CH] = nct_vrm_mos_milli(whole, frac);
+    data->vrm_mos_read_at = now;
+    nct_vrm_note_mos(data);
 }
 
-static int nct_vrm_bus_recover(struct nct6687_data* data)
+static void nct_vrm_locked(struct nct6687_data* data, bool demand)
 {
-    nct_vrm_invalidate_smbus(data);
-    return nct_vrm_recover(data);
+    unsigned long floor;
+
+    mutex_lock(&nct_vrm_session_lock);
+    if (demand)
+        data->vrm_demand = true;
+    else {
+        /* update_device just refreshed temperature[]. */
+        nct_vrm_note_mos(data);
+        data->vrm_mos_read_at = jiffies;
+    }
+    if (demand)
+        nct_vrm_sample_mos(data);
+    floor = msecs_to_jiffies(20);
+    if (!floor)
+        floor = 1;
+    nct_vrm_demand_session(data, HZ, floor, (u8)(vrm_addr & 0xff), vrm_vout_exp,
+        vrm_gt);
+    if (demand)
+        data->vrm_last_read = jiffies;
+    mutex_unlock(&nct_vrm_session_lock);
 }
 
 static void nct6687_update_vrm(struct nct6687_data* data)
 {
-    struct nct_vrm_rail* cpu = &data->vrm_rail[0];
-    struct nct_vrm_rail* gt = &data->vrm_rail[1];
-    u8 cfg_save, baud_save;
-    u8 addr;
-    long sample[NCT_VRM_NMETRIC];
-    unsigned long now, floor, gap, age;
-    bool demanded, last_read_set;
-
     if (!data->vrm_enabled)
         return;
 
-    /* EC temp was refreshed by update_device, or is the probe sample.
-     * Demand reads re-apply that cached value; they do not invent a new one.
-     */
-    nct_vrm_note_mos(data);
-
-    /*
-     * Rate-limit even when invalid: a wedged VR/mux must not be hammered at
-     * hwmon poll rate. Background / non-VRM paths: 1 Hz. VRM sysfs demand:
-     * match inter-read gap down to ~20 ms. After failure: nct_vrm_fail_interval
-     * (HZ/4, then HZ, 2*HZ, cap 8*HZ).
-     * First demand after idle (or first-ever) uses the 20 ms floor — not 1 Hz
-     * just because last_read is 0 or aged >= 1 s.
-     */
-    demanded = data->vrm_demand;
-    data->vrm_demand = false;
-
-    now = jiffies;
-    floor = msecs_to_jiffies(20);
-    if (!floor)
-        floor = 1;
-
-    last_read_set = data->vrm_last_read != 0;
-    gap = last_read_set ? now - data->vrm_last_read : 0;
-    age = data->vrm_last_updated ? now - data->vrm_last_updated : ~0UL;
-    if (demanded)
-        data->vrm_read_gap = gap;
-
-    if (!nct_vrm_should_sample(cpu->valid, demanded, last_read_set, gap,
-            age, HZ, floor, data->vrm_fail_count))
-        return;
-
-    addr = (u8)(vrm_addr & 0xff);
-    cfg_save = 0;
-    baud_save = 0;
-
-    mutex_lock(&data->EC_io_lock);
-
-    if (nct_vrm_esio_read(data, 4, 0x61, &cfg_save) || nct_vrm_esio_read(data, 4, 0x62, &baud_save)) {
-        cpu->valid = false;
-        gt->valid = false;
-        data->vrm_last_updated = jiffies;
-        data->vrm_fail_count++;
-        if (nct_vrm_bus_recover(data))
-            pr_warn_ratelimited("nct6687: VRM recover failed\n");
-        mutex_unlock(&data->EC_io_lock);
-        return;
-    }
-
-    if (nct_vrm_esio_write(data, 0x61, (cfg_save & ~0x03) | 0x00) || nct_vrm_esio_write(data, 0x62, 0x03) || nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN) || nct_vrm_sample_page(data, addr, 0, vrm_vout_exp, sample)) {
-        cpu->valid = false;
-        gt->valid = false;
-        data->vrm_last_updated = jiffies;
-        data->vrm_fail_count++;
-        if (nct_vrm_bus_recover(data))
-            pr_warn_ratelimited("nct6687: VRM recover failed\n");
-        /* One mux restore. Ignore write errors — no retry on a wedged window. */
-        nct_vrm_esio_write(data, 0x61, cfg_save);
-        nct_vrm_esio_write(data, 0x62, baud_save);
-        mutex_unlock(&data->EC_io_lock);
-        return;
-    }
-
-    nct_vrm_rail_apply(cpu, sample);
-    data->vrm_last_updated = jiffies;
-
-    /* GT failure after a good CPU sample keeps CPU valid. */
-    if (vrm_gt) {
-        if (nct_vrm_sample_page(data, addr, 1, vrm_vout_exp, sample)) {
-            gt->valid = false;
-            if (nct_vrm_bus_recover(data))
-                pr_warn_ratelimited("nct6687: VRM recover failed\n");
-        } else {
-            nct_vrm_rail_apply(gt, sample);
-            nct_vrm_esio_write(data, 0x60, 0x00);
-        }
-    } else {
-        gt->valid = false;
-        nct_vrm_esio_write(data, 0x60, 0x00);
-    }
-
-    /* One mux restore. If it fails, drop the cache so fail-interval backoff
-     * applies — do not retry the write on a wedged window. Reset the fail
-     * count only after the PAGE sample and the mux restore both succeed.
-     */
-    if (nct_vrm_esio_write(data, 0x61, cfg_save) || nct_vrm_esio_write(data, 0x62, baud_save)) {
-        cpu->valid = false;
-        gt->valid = false;
-        data->vrm_fail_count++;
-    } else {
-        data->vrm_fail_count = 0;
-    }
-    mutex_unlock(&data->EC_io_lock);
+    /* Background hook. Demand flag stays clear, so the session keeps 1 Hz. */
+    nct_vrm_locked(data, false);
 }
 
 static struct nct6687_data* nct_vrm_touch_and_update(struct device* dev)
 {
     struct nct6687_data* data = dev_get_drvdata(dev);
 
-    data->vrm_demand = true;
     /* VRM sysfs must not go through nct6687_update_device: that refreshes
      * every fan/temp/volt channel under update_lock. HUD polling would
      * otherwise force a full EC scan ~1 Hz on top of the SMBus sample.
      * Background 1 Hz VRM still runs from the update_device hook when
-     * other nct6687 attrs are read.
-     * Stamp last_read after should_sample so first-ever / idle demand sees
-     * last_read==0 or the real gap — not a synthetic HZ.
+     * other nct6687 attrs are read. A VRM poll reads the MOS thermistor
+     * itself so low/high track it between those scans.
+     * last_read is stamped inside the session lock, after the sample, so
+     * first-ever / idle demand sees last_read==0 or the real gap.
      */
-    nct6687_update_vrm(data);
-    data->vrm_last_read = jiffies;
+    if (data->vrm_enabled)
+        nct_vrm_locked(data, true);
+    else
+        data->vrm_last_read = jiffies;
     return data;
 }
 
@@ -250,14 +227,14 @@ struct nct_vrm_chan {
 };
 
 static const struct nct_vrm_chan nct_vrm_chans[] = {
-    [NCT_VRM_CPU_VOUT] = { "VRM CPU VOUT", 0, NCT_VRM_VOUT },
-    [NCT_VRM_CPU_VIN] = { "VRM CPU VIN", 0, NCT_VRM_VIN },
-    [NCT_VRM_CPU_IOUT] = { "VRM CPU IOUT", 0, NCT_VRM_IOUT },
-    [NCT_VRM_CPU_IIN] = { "VRM CPU IIN", 0, NCT_VRM_IIN },
-    [NCT_VRM_CPU_POUT] = { "VRM CPU POUT", 0, NCT_VRM_POUT },
-    [NCT_VRM_CPU_PIN] = { "VRM CPU PIN", 0, NCT_VRM_PIN },
-    [NCT_VRM_CPU_EFF] = { "VRM CPU Efficiency", 0, NCT_VRM_EFF },
-    [NCT_VRM_CPU_TEMP] = { "VRM CPU TEMP", 0, NCT_VRM_TEMP },
+    [NCT_VRM_CPU_VOUT] = { "VRM VOUT", 0, NCT_VRM_VOUT },
+    [NCT_VRM_CPU_VIN] = { "VRM VIN", 0, NCT_VRM_VIN },
+    [NCT_VRM_CPU_IOUT] = { "VRM IOUT", 0, NCT_VRM_IOUT },
+    [NCT_VRM_CPU_IIN] = { "VRM IIN", 0, NCT_VRM_IIN },
+    [NCT_VRM_CPU_POUT] = { "VRM POUT", 0, NCT_VRM_POUT },
+    [NCT_VRM_CPU_PIN] = { "VRM PIN", 0, NCT_VRM_PIN },
+    [NCT_VRM_CPU_EFF] = { "VRM EFFICIENCY", 0, NCT_VRM_EFF },
+    [NCT_VRM_CPU_TEMP] = { "VRM TEMP", 0, NCT_VRM_TEMP },
     [NCT_VRM_GT_VOUT] = { "VRM GT VOUT", 1, NCT_VRM_VOUT },
     [NCT_VRM_GT_VIN] = { "VRM GT VIN", 1, NCT_VRM_VIN },
     [NCT_VRM_GT_IOUT] = { "VRM GT IOUT", 1, NCT_VRM_IOUT },
@@ -308,12 +285,12 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
         val = r->val[ch->metric];
         break;
     case NCT_VRM_MIN:
-        if (!nct_vrm_rail_hist_ready(r, ch->metric))
+        if (!nct_vrm_publish_hist(r->valid, nct_vrm_rail_hist_ready(r, ch->metric)))
             return -ENODATA;
         val = r->min[ch->metric];
         break;
     case NCT_VRM_MAX:
-        if (!nct_vrm_rail_hist_ready(r, ch->metric))
+        if (!nct_vrm_publish_hist(r->valid, nct_vrm_rail_hist_ready(r, ch->metric)))
             return -ENODATA;
         val = r->max[ch->metric];
         break;
@@ -361,6 +338,40 @@ NCT_VRM_ATTR(temp20_input, NCT_VRM_CPU_TEMP, NCT_VRM_INPUT);
 NCT_VRM_ATTR(temp20_label, NCT_VRM_CPU_TEMP, NCT_VRM_LABEL);
 NCT_VRM_ATTR(temp20_min, NCT_VRM_CPU_TEMP, NCT_VRM_MIN);
 NCT_VRM_ATTR(temp20_max, NCT_VRM_CPU_TEMP, NCT_VRM_MAX);
+
+static ssize_t nct_vrm_ctrl_show(struct device* dev, struct device_attribute* attr, char* buf)
+{
+    struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
+    struct nct6687_data* data;
+
+    if (sattr->index == NCT_VRM_LABEL)
+        return sprintf(buf, "VRM CONTROLLER\n");
+
+    data = nct_vrm_touch_and_update(dev);
+    switch (sattr->index) {
+    case NCT_VRM_INPUT:
+        if (!data->vrm_ctrl_valid)
+            return -ENODATA;
+        return sprintf(buf, "%ld\n", data->vrm_ctrl_mc);
+    case NCT_VRM_MIN:
+    case NCT_VRM_MAX:
+        if (!nct_vrm_publish_hist(data->vrm_ctrl_valid, data->vrm_ctrl_hist_init))
+            return -ENODATA;
+        return sprintf(buf, "%ld\n",
+            sattr->index == NCT_VRM_MAX ? data->vrm_ctrl_max : data->vrm_ctrl_min);
+    default:
+        return -EINVAL;
+    }
+}
+
+static SENSOR_DEVICE_ATTR_2(temp22_input, 0444, nct_vrm_ctrl_show, NULL,
+    NCT_VRM_CTRL_NR, NCT_VRM_INPUT);
+static SENSOR_DEVICE_ATTR_2(temp22_label, 0444, nct_vrm_ctrl_show, NULL,
+    NCT_VRM_CTRL_NR, NCT_VRM_LABEL);
+static SENSOR_DEVICE_ATTR_2(temp22_min, 0444, nct_vrm_ctrl_show, NULL,
+    NCT_VRM_CTRL_NR, NCT_VRM_MIN);
+static SENSOR_DEVICE_ATTR_2(temp22_max, 0444, nct_vrm_ctrl_show, NULL,
+    NCT_VRM_CTRL_NR, NCT_VRM_MAX);
 NCT_VRM_ATTR(in22_input, NCT_VRM_GT_VOUT, NCT_VRM_INPUT);
 NCT_VRM_ATTR(in22_label, NCT_VRM_GT_VOUT, NCT_VRM_LABEL);
 NCT_VRM_ATTR(in22_min, NCT_VRM_GT_VOUT, NCT_VRM_MIN);
@@ -397,10 +408,11 @@ static ssize_t nct_vrm_mos_show(struct device* dev, struct device_attribute* att
     struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
     struct nct6687_data* data = nct6687_update_device(dev);
 
-    if (!data->vrm_mos_hist_init)
+    if (!nct_vrm_mos_ready(data->vrm_mos_hist_init))
         return -ENODATA;
     return sprintf(buf, "%ld\n",
-        sattr->index == NCT_VRM_MAX ? data->vrm_mos_max : data->vrm_mos_min);
+        nct_vrm_mos_value(data->vrm_mos_min, data->vrm_mos_max,
+            sattr->index == NCT_VRM_MAX));
 }
 
 static SENSOR_DEVICE_ATTR_2(temp3_min, 0444, nct_vrm_mos_show, NULL,
@@ -457,6 +469,10 @@ static struct attribute* nct6687_vrm_attrs[] = {
     &sensor_dev_attr_temp20_label.dev_attr.attr,
     &sensor_dev_attr_temp20_min.dev_attr.attr,
     &sensor_dev_attr_temp20_max.dev_attr.attr,
+    &sensor_dev_attr_temp22_input.dev_attr.attr,
+    &sensor_dev_attr_temp22_label.dev_attr.attr,
+    &sensor_dev_attr_temp22_min.dev_attr.attr,
+    &sensor_dev_attr_temp22_max.dev_attr.attr,
     &sensor_dev_attr_temp3_min.dev_attr.attr,
     &sensor_dev_attr_temp3_max.dev_attr.attr,
     &sensor_dev_attr_in22_input.dev_attr.attr,

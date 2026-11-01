@@ -74,12 +74,13 @@ sensors
 | `power1_input_lowest` / `power1_input_highest` | CPU POUT software hist | µW |
 | `power3_input` | CPU PIN (`READ_PIN`, 1 W/count) | µW |
 | `power3_input_lowest` / `power3_input_highest` | CPU PIN software hist | µW |
-| `pwm9` | CPU efficiency, `POUT/PIN` capped at 100% | count (`sensors` prints count/2 as `%`; 100% is 200) |
-| `temp20_input` | VR temperature | m°C |
+| `pwm9` | VRM EFFICIENCY, `POUT/PIN` capped at 100% | count (`sensors` prints count/2 as `%`; 100% is 200) |
+| `temp20_input` | VRM TEMP, hottest power stage (`0x8D`) | m°C |
+| `temp22_input` | VRM CONTROLLER, controller die (`0x8E`) | m°C |
 | `temp3_min` / `temp3_max` | VRM MOS software hist | m°C |
 | `vrm_cpu` | CPU VOUT + IOUT + POUT (one read) | mV mA µW |
 
-Background PAGE samples stay at 1 Hz (fan/temp hook). A VRM sysfs demand follows the inter-read gap down to about 20 ms, including the first read after idle. Consecutive sample failures back off (about 4 Hz, then 1 Hz, 0.5 Hz, cap 8 s) so a wedged VR does not hold `EC_io_lock` at 4 Hz forever. Fast demand still shares that lock with fans and temps. VRM sysfs only samples the VR, not the full fan/temp scan. `vrm_cpu` returns VOUT, IOUT, and POUT in one read. Software hist for IOUT/IIN/POUT/PIN ignores a negative millisi sample. POUT hist is `power1_input_lowest` / `power1_input_highest` and PIN hist is `power3_input_lowest` / `power3_input_highest` so `sensors` prints `lowest` then `highest`. `power*_min` / `power*_max` would print max-then-min, and power has no `low` label. VRM MOS hist is `temp3_min` / `temp3_max` (`sensors` prints `low` / `high`). VRM CPU TEMP stays `temp20_min` / `temp20_max`. Efficiency is not a register. It is `POUT/PIN`, capped at 100%, published as read-only `pwm9` so `sensors` prints a plain `%`. `pwm1`–`pwm8` stay the fan duties. There is no `pwm9_enable`. Either power at or below zero hides the value. Whole percents only. libsensors 3.6.2 keeps four characters of a pwm name, so there is no `pwm10` and no GT efficiency line.
+Background PAGE samples stay at 1 Hz (fan/temp hook). A VRM sysfs demand follows the inter-read gap down to about 20 ms, including the first read after idle. Consecutive sample failures back off (about 4 Hz, then 1 Hz, 0.5 Hz, cap 8 s) so a wedged VR does not hold `EC_io_lock` at 4 Hz forever. Fast demand still shares that lock with fans and temps. VRM sysfs only samples the VR, not the full fan/temp scan. `vrm_cpu` returns VOUT, IOUT, and POUT in one read. Software hist for IOUT/IIN/POUT/PIN ignores a negative millisi sample. POUT hist is `power1_input_lowest` / `power1_input_highest` and PIN hist is `power3_input_lowest` / `power3_input_highest` so `sensors` prints `lowest` then `highest`. `power*_min` / `power*_max` would print max-then-min, and power has no `low` label. VRM MOS hist is `temp3_min` / `temp3_max` (`sensors` prints `low` / `high`). VRM TEMP stays `temp20_min` / `temp20_max`. VRM CONTROLLER is `temp22_input` plus `temp22_min` / `temp22_max`. Efficiency is not a register. It is `POUT/PIN`, capped at 100%, published as read-only `pwm9` so `sensors` prints a plain `%`. `pwm1`–`pwm8` stay the fan duties. There is no `pwm9_enable`. Either power at or below zero hides the value. Whole percents only. libsensors 3.6.2 keeps four characters of a pwm name, so there is no `pwm10` and no GT efficiency line.
 
 GT / iGPU is PMBus PAGE 1. Usually idle if you have a discrete GPU:
 
@@ -110,6 +111,8 @@ That copies **this checkout** into `/usr/local` (`SOURCE_REPO=` here). A dirty o
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm_decode.h` | `dkms/nct6687_vrm_decode.h` (raw→millisi math, also used by host tests) |
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm_data.h` | `dkms/nct6687_vrm_data.h` (VRM members of `nct6687_data`) |
 | `/usr/local/lib/nct6687-vrm/nct6687_vrm_mailbox.h` | `dkms/nct6687_vrm_mailbox.h` (eSIO mailbox; host-tested) |
+| `/usr/local/lib/nct6687-vrm/nct6687_vrm_demand.h` | `dkms/nct6687_vrm_demand.h` (VRM demand session; host-tested) |
+| `/usr/local/lib/nct6687-vrm/nct6687_vrm_hist.h` | `dkms/nct6687_vrm_hist.h` (software hist for PAGE rails and VRM MOS) |
 | `/usr/local/lib/nct6687-vrm/vrm-splice.patch` | `patches/vrm-splice.patch` (overlay `-p1`) |
 | `/usr/local/lib/nct6687-vrm/source.env` | written at install (`SOURCE_REPO=` this checkout) |
 | `/etc/pacman.d/hooks/nct6687-vrm-preupgrade.hook` | `pacman-hook/nct6687-vrm-preupgrade.hook` |

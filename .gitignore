@@ -15,3 +15,4 @@ modules.order
 .DS_Store
 .vrm-verify-build-user/
 tests/vrm_decode
+/nct6687_vrm_port

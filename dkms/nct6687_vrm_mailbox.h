@@ -227,14 +227,16 @@ static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
  * Production PAGE sample — source of truth for userspace _sample_page:
  *   PAGE write+readback (cache miss), VOUT_MODE 0x20 (cached),
  *   then TEMP 0x8D, VOUT 0x8B, VIN 0x88, IOUT 0x8C, IIN 0x89, POUT 0x96, PIN 0x97.
- *   Order is TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. TEMP2/TEMP3 are not on this path.
+ *   Order is TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. TEMP2 (0x8E, controller die) is one
+ *   read in the demand session, not here. TEMP3 (0x8F) is not sampled.
  *   IOUT is always READ_IOUT (Direct, 0.1 A/LSB), not POUT/VOUT.
  *   CAP 0x19 / STATUS 0x78 are not on this path (debug-only in userspace).
  * Any failure invalidates the PAGE/VOUT_MODE cache. out[] is indexed by
- * enum nct_vrm_metric and is only written on success.
+ * enum nct_vrm_metric and is only written on success. raw may be NULL; when
+ * set, it receives those same words.
  */
 static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
-	int vout_exp, long out[NCT_VRM_NMETRIC])
+	int vout_exp, long out[NCT_VRM_NMETRIC], u16* raw)
 {
 	u16 vout, iout = 0, iin = 0, pout, pin = 0, vin, temp;
 	u8 vout_mode, page_r;
@@ -286,6 +288,15 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
 	out[NCT_VRM_TEMP] = t_mc;
 	out[NCT_VRM_IIN] = iin_ma;
 	out[NCT_VRM_PIN] = pin_uw;
+	if (raw) {
+		raw[NCT_VRM_VOUT] = vout;
+		raw[NCT_VRM_VIN] = vin;
+		raw[NCT_VRM_IOUT] = iout;
+		raw[NCT_VRM_POUT] = pout;
+		raw[NCT_VRM_TEMP] = temp;
+		raw[NCT_VRM_IIN] = iin;
+		raw[NCT_VRM_PIN] = pin;
+	}
 	return 0;
 }
 
