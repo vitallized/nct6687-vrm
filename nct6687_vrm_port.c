@@ -241,7 +241,11 @@ int main(int argc, char** argv)
 	rc = mux_sample(&data, (u8)addr, port_mux, (u8)page, vout_exp, debug, temps,
 		sample, raw, &vout_mode, &cap, &status, &temp2_ok, &temp2_raw, &temp3_ok,
 		&temp3_raw);
-	nct_vrm_recover(&data);
+	/* Same as the kernel: recover only after a failed window. A good one
+	 * already wrote 0x60=0 and restored the mux.
+	 */
+	if (rc)
+		nct_vrm_recover(&data);
 	close(port_fd);
 	port_fd = -1;
 	if (rc) {
