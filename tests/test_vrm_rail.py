@@ -81,6 +81,18 @@ def test_store_is_latest_sample_and_hist_spans_all(c_decode_bin: Path) -> None:
     assert r["pin"] == (100000000, True, 90000000, 120000000)
 
 
+def test_signed_current_words_are_small_negatives(c_decode_bin: Path) -> None:
+    # 0xFFF6 is -10 counts → -1.0 A. 0xFFDE is -34 counts → -0.34 A.
+    iout = subprocess.check_output(
+        [str(c_decode_bin), "decode_iout_ma", "0xFFF6"], text=True
+    ).strip()
+    iin = subprocess.check_output(
+        [str(c_decode_bin), "decode_iin_ma", "0xFFDE"], text=True
+    ).strip()
+    assert iout == "-1000"
+    assert iin == "-340"
+
+
 def test_negative_iout_pout_spike_does_not_become_hist_min(c_decode_bin: Path) -> None:
     r = _rail(
         c_decode_bin,

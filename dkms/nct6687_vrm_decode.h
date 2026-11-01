@@ -99,16 +99,22 @@ static long nct_vrm_decode_vin_mv(u16 vin)
 	return (long)vin * 10L;
 }
 
+/* Family datasheet: two's complement. 0xFFF6 is -10 counts, not 6552.6 A. */
+static long nct_vrm_i16(u16 raw)
+{
+	return (raw & 0x8000) ? (long)raw - 65536L : (long)raw;
+}
+
 /* READ_IOUT Direct, 0.1 A/LSB → milliamps. */
 static long nct_vrm_decode_iout_ma(u16 iout)
 {
-	return (long)iout * 100L;
+	return nct_vrm_i16(iout) * 100L;
 }
 
 /* READ_IIN Direct, 0.01 A/LSB → milliamps. */
 static long nct_vrm_decode_iin_ma(u16 iin)
 {
-	return (long)iin * 10L;
+	return nct_vrm_i16(iin) * 10L;
 }
 
 /* READ_PIN Direct, 1 W/LSB → microwatts. */
