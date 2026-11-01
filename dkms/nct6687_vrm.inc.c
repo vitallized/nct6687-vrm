@@ -145,7 +145,7 @@ static void nct_vrm_note_mos(struct nct6687_data* data)
 static void nct_vrm_sample_mos(struct nct6687_data* data)
 {
     unsigned long now, hold;
-    unsigned whole, frac;
+    u16 whole, frac;
 
     if (!nct_vrm_mos_present())
         return;
@@ -155,24 +155,25 @@ static void nct_vrm_sample_mos(struct nct6687_data* data)
         hold = 1;
     if (data->vrm_mos_hist_init && time_before(now, data->vrm_mos_read_at + hold))
         return;
-    whole = nct6687_read(data, NCT6687_REG_TEMP(NCT_VRM_MOS_CH));
-    frac = nct6687_read(data, NCT6687_REG_TEMP(NCT_VRM_MOS_CH) + 1);
+    /* One EC_io_lock for both bytes. Two nct6687_read calls drop it between them. */
+    nct6687_read_pair(data, NCT6687_REG_TEMP(NCT_VRM_MOS_CH), &whole, &frac);
     data->temperature[NCT_VRM_MOS_CH] = nct_vrm_mos_milli(whole, frac);
     data->vrm_mos_read_at = now;
     nct_vrm_note_mos(data);
 }
 
-/* page0, when non-NULL, receives the CPU rail under this lock. -ENODATA if invalid. */
-static int nct_vrm_locked(struct nct6687_data* data, bool demand, long* page0)
+/* Caller holds nct_vrm_session_lock until nct_vrm_session_leave. */
+static void nct_vrm_session_enter(struct nct6687_data* data, bool demand)
 {
     unsigned long floor;
-    int rc = 0;
 
     mutex_lock(&nct_vrm_session_lock);
     if (demand)
         data->vrm_demand = true;
-    else {
-        /* update_device just refreshed temperature[]. */
+    else if (!time_after(jiffies, data->last_updated)) {
+        /* Cache hits also call update_vrm. Only a scan that just stored
+         * temperature[] should hold off the VRM thermistor read.
+         */
         nct_vrm_note_mos(data);
         data->vrm_mos_read_at = jiffies;
     }
@@ -183,15 +184,28 @@ static int nct_vrm_locked(struct nct6687_data* data, bool demand, long* page0)
         floor = 1;
     nct_vrm_demand_session(data, HZ, floor, (u8)(vrm_addr & 0xff), vrm_vout_exp,
         vrm_gt);
+}
+
+static void nct_vrm_session_leave(struct nct6687_data* data, bool demand)
+{
     if (demand)
         data->vrm_last_read = jiffies;
+    mutex_unlock(&nct_vrm_session_lock);
+}
+
+/* page0, when non-NULL, receives the CPU rail under this lock. -ENODATA if invalid. */
+static int nct_vrm_locked(struct nct6687_data* data, bool demand, long* page0)
+{
+    int rc = 0;
+
+    nct_vrm_session_enter(data, demand);
     if (page0) {
         if (!data->vrm_rail[0].valid)
             rc = -ENODATA;
         else
             memcpy(page0, data->vrm_rail[0].val, sizeof(data->vrm_rail[0].val));
     }
-    mutex_unlock(&nct_vrm_session_lock);
+    nct_vrm_session_leave(data, demand);
     return rc;
 }
 
@@ -204,35 +218,30 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     nct_vrm_locked(data, false, NULL);
 }
 
-static struct nct6687_data* nct_vrm_touch_and_update(struct device* dev)
-{
-    struct nct6687_data* data = dev_get_drvdata(dev);
-
-    /* VRM sysfs must not go through nct6687_update_device: that refreshes
-     * every fan/temp/volt channel under update_lock. HUD polling would
-     * otherwise force a full EC scan ~1 Hz on top of the SMBus sample.
-     * Background 1 Hz VRM still runs from the update_device hook when
-     * other nct6687 attrs are read. A VRM poll reads the MOS thermistor
-     * itself so low/high track it between those scans.
-     * last_read is stamped inside the session lock, after the sample, so
-     * first-ever / idle demand sees last_read==0 or the real gap.
-     */
-    if (data->vrm_enabled)
-        nct_vrm_locked(data, true, NULL);
-    else
-        data->vrm_last_read = jiffies;
-    return data;
-}
-
 static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, char* buf)
 {
-    struct nct6687_data* data = nct_vrm_touch_and_update(dev);
-    const struct nct_vrm_rail* cpu = &data->vrm_rail[0];
+    struct nct6687_data* data = dev_get_drvdata(dev);
+    long vout, iout, pout;
+    int ok = 0;
 
-    if (!cpu->valid)
+    (void)attr;
+    /* VRM sysfs must not go through nct6687_update_device: that refreshes
+     * every fan/temp/volt channel under update_lock. Copy VOUT/IOUT/POUT
+     * before the session lock drops so a second reader cannot tear them.
+     */
+    if (!data->vrm_enabled)
         return -ENODATA;
-    return sprintf(buf, "%ld %ld %ld\n", cpu->val[NCT_VRM_VOUT],
-        cpu->val[NCT_VRM_IOUT], cpu->val[NCT_VRM_POUT]);
+    nct_vrm_session_enter(data, true);
+    if (data->vrm_rail[0].valid) {
+        vout = data->vrm_rail[0].val[NCT_VRM_VOUT];
+        iout = data->vrm_rail[0].val[NCT_VRM_IOUT];
+        pout = data->vrm_rail[0].val[NCT_VRM_POUT];
+        ok = 1;
+    }
+    nct_vrm_session_leave(data, true);
+    if (!ok)
+        return -ENODATA;
+    return sprintf(buf, "%ld %ld %ld\n", vout, iout, pout);
 }
 
 /* VOUT VIN IOUT IIN POUT PIN from the CPU rail, copied before the lock drops. */
@@ -311,7 +320,8 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
     const struct nct_vrm_chan* ch;
     const struct nct_vrm_rail* r;
     struct nct6687_data* data;
-    long val;
+    long val = 0;
+    int rc = 0;
 
     if (sattr->nr >= ARRAY_SIZE(nct_vrm_chans))
         return -EINVAL;
@@ -320,42 +330,53 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
     if (sattr->index == NCT_VRM_LABEL)
         return sprintf(buf, "%s\n", ch->label);
 
-    data = nct_vrm_touch_and_update(dev);
-    r = &data->vrm_rail[ch->page];
+    data = dev_get_drvdata(dev);
+    if (!data->vrm_enabled)
+        return -ENODATA;
 
     /* pwm9, read-only, no _enable. This sensors divides the count by 2
      * and prints "%", so 100% is 200. pwm1–pwm8 are the fan duties.
      * libsensors 3.6.2 keeps 4 chars of a pwm name, so pwm10 would alias
      * pwm1. No GT efficiency channel.
+     * The value is copied before the session lock drops. eff_publish reads
+     * two smoothed powers; a rail read is one slot of a memcpy.
      */
+    nct_vrm_session_enter(data, true);
     if (ch->metric == NCT_VRM_EFF) {
         if (sattr->index != NCT_VRM_INPUT)
-            return -EINVAL;
-        if (!nct_vrm_eff_publish(data->vrm_eff_init, data->vrm_eff_pout_uw,
+            rc = -EINVAL;
+        else if (!nct_vrm_eff_publish(data->vrm_eff_init, data->vrm_eff_pout_uw,
                 data->vrm_eff_pin_uw, &val))
-            return -ENODATA;
-        return sprintf(buf, "%ld\n", val);
+            rc = -ENODATA;
+    } else {
+        r = &data->vrm_rail[ch->page];
+        switch (sattr->index) {
+        case NCT_VRM_INPUT:
+            if (!r->valid)
+                rc = -ENODATA;
+            else
+                val = r->val[ch->metric];
+            break;
+        case NCT_VRM_MIN:
+            if (!nct_vrm_publish_hist(r->valid, nct_vrm_rail_hist_ready(r, ch->metric)))
+                rc = -ENODATA;
+            else
+                val = r->min[ch->metric];
+            break;
+        case NCT_VRM_MAX:
+            if (!nct_vrm_publish_hist(r->valid, nct_vrm_rail_hist_ready(r, ch->metric)))
+                rc = -ENODATA;
+            else
+                val = r->max[ch->metric];
+            break;
+        default:
+            rc = -EINVAL;
+            break;
+        }
     }
-
-    switch (sattr->index) {
-    case NCT_VRM_INPUT:
-        if (!r->valid)
-            return -ENODATA;
-        val = r->val[ch->metric];
-        break;
-    case NCT_VRM_MIN:
-        if (!nct_vrm_publish_hist(r->valid, nct_vrm_rail_hist_ready(r, ch->metric)))
-            return -ENODATA;
-        val = r->min[ch->metric];
-        break;
-    case NCT_VRM_MAX:
-        if (!nct_vrm_publish_hist(r->valid, nct_vrm_rail_hist_ready(r, ch->metric)))
-            return -ENODATA;
-        val = r->max[ch->metric];
-        break;
-    default:
-        return -EINVAL;
-    }
+    nct_vrm_session_leave(data, true);
+    if (rc)
+        return rc;
     return sprintf(buf, "%ld\n", val);
 }
 
@@ -404,25 +425,38 @@ static ssize_t nct_vrm_ctrl_show(struct device* dev, struct device_attribute* at
 {
     struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
     struct nct6687_data* data;
+    long val = 0;
+    int rc = 0;
 
     if (sattr->index == NCT_VRM_LABEL)
         return sprintf(buf, "VRM CONTROLLER\n");
 
-    data = nct_vrm_touch_and_update(dev);
+    data = dev_get_drvdata(dev);
+    if (!data->vrm_enabled)
+        return -ENODATA;
+    nct_vrm_session_enter(data, true);
     switch (sattr->index) {
     case NCT_VRM_INPUT:
         if (!data->vrm_ctrl_valid)
-            return -ENODATA;
-        return sprintf(buf, "%ld\n", data->vrm_ctrl_mc);
+            rc = -ENODATA;
+        else
+            val = data->vrm_ctrl_mc;
+        break;
     case NCT_VRM_MIN:
     case NCT_VRM_MAX:
         if (!nct_vrm_publish_hist(data->vrm_ctrl_valid, data->vrm_ctrl_hist_init))
-            return -ENODATA;
-        return sprintf(buf, "%ld\n",
-            sattr->index == NCT_VRM_MAX ? data->vrm_ctrl_max : data->vrm_ctrl_min);
+            rc = -ENODATA;
+        else
+            val = sattr->index == NCT_VRM_MAX ? data->vrm_ctrl_max : data->vrm_ctrl_min;
+        break;
     default:
-        return -EINVAL;
+        rc = -EINVAL;
+        break;
     }
+    nct_vrm_session_leave(data, true);
+    if (rc)
+        return rc;
+    return sprintf(buf, "%ld\n", val);
 }
 
 static SENSOR_DEVICE_ATTR_2(temp22_input, 0444, nct_vrm_ctrl_show, NULL,
@@ -468,12 +502,18 @@ static ssize_t nct_vrm_mos_show(struct device* dev, struct device_attribute* att
 {
     struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
     struct nct6687_data* data = nct6687_update_device(dev);
+    long val = 0;
+    int ok;
 
-    if (!nct_vrm_mos_ready(data->vrm_mos_hist_init))
+    mutex_lock(&nct_vrm_session_lock);
+    ok = nct_vrm_mos_ready(data->vrm_mos_hist_init);
+    if (ok)
+        val = nct_vrm_mos_value(data->vrm_mos_min, data->vrm_mos_max,
+            sattr->index == NCT_VRM_MAX);
+    mutex_unlock(&nct_vrm_session_lock);
+    if (!ok)
         return -ENODATA;
-    return sprintf(buf, "%ld\n",
-        nct_vrm_mos_value(data->vrm_mos_min, data->vrm_mos_max,
-            sattr->index == NCT_VRM_MAX));
+    return sprintf(buf, "%ld\n", val);
 }
 
 static SENSOR_DEVICE_ATTR_2(temp3_min, 0444, nct_vrm_mos_show, NULL,

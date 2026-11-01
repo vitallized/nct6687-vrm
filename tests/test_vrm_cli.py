@@ -54,6 +54,22 @@ def test_unloaded_loop_is_allowed() -> None:
     assert vrm.userspace_guard(loaded=False, force=False, looping=True) is None
 
 
+def test_temp_probe_uses_linear11_millisi() -> None:
+    sample = vrm._sample_from_port_text(
+        _PORT_STDOUT,
+        base=0xA20,
+        addr=0xC0,
+        page=0,
+        vout_exp=-10,
+    )
+    text = vrm.format_temp_probe(
+        sample,
+        {"temp2_ok": 1, "temp2_raw": 0x07FB, "temp2_mc": -5000, "temp3_ok": 0},
+    )
+    assert "-5.0" in text
+    assert "2043" not in text
+
+
 def test_port_tool_compiles(tmp_path: Path) -> None:
     src = Path(__file__).resolve().parents[1] / "nct6687_vrm_port.c"
     out = tmp_path / "nct6687_vrm_port"

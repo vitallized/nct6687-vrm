@@ -88,15 +88,22 @@ def _demand(
 
 def test_vrm_sysfs_poll_samples_mos_thermistor() -> None:
     text = (Path(__file__).resolve().parents[1] / "dkms" / "nct6687_vrm.inc.c").read_text()
-    touch = text.split("nct_vrm_touch_and_update", 1)[1].split("\n}", 1)[0]
+    enter = text.split("static void nct_vrm_session_enter", 1)[1].split("\n}", 1)[0]
     locked = text.split("static int nct_vrm_locked", 1)[1].split("\n}", 1)[0]
     sample = text.split("static void nct_vrm_sample_mos", 1)[1].split("\n}", 1)[0]
-    assert "nct_vrm_locked" in touch
-    assert "vrm_demand = true" in locked
-    assert "nct_vrm_session_lock" in locked
-    assert "nct_vrm_sample_mos" in locked
-    assert "nct6687_read" in sample
+    cpu = text.split("static ssize_t vrm_cpu_show", 1)[1].split("\n}", 1)[0]
+    assert "vrm_demand = true" in enter
+    assert "nct_vrm_session_lock" in enter
+    assert "nct_vrm_sample_mos" in enter
+    assert "nct_vrm_session_enter" in locked
+    assert "memcpy" in locked
+    assert "nct_vrm_session_enter" in cpu
+    assert "nct_vrm_session_leave" in cpu
+    assert "cpu->val" not in cpu
+    assert "nct6687_read_pair" in sample
     assert "nct_vrm_note_mos" in sample
+    assert "time_after" in enter
+    assert "last_updated" in enter
 
 
 def test_first_demand_after_idle_samples_when_cache_older_than_20ms(
@@ -192,6 +199,34 @@ def test_invalid_after_many_fails_samples_after_8hz(c_mailbox_bin: Path) -> None
         fails=4,
     )
     assert got["io"] == 1
+
+
+def test_demand_samples_when_stamps_share_a_jiffy(c_mailbox_bin: Path) -> None:
+    # Production stamps last_updated and last_read from the same jiffy.
+    # A 50 ms poll must sample, not wait until the cache is 100 ms old.
+    got = _demand(
+        c_mailbox_bin,
+        now=10_050,
+        demanded=True,
+        last_read=10_000,
+        last_updated=10_000,
+        cpu_valid=True,
+    )
+    assert got["io"] == 1
+    assert got["read_gap"] == 50
+
+
+def test_demand_floor_samples_at_20ms(c_mailbox_bin: Path) -> None:
+    got = _demand(
+        c_mailbox_bin,
+        now=10_020,
+        demanded=True,
+        last_read=10_000,
+        last_updated=10_000,
+        cpu_valid=True,
+    )
+    assert got["io"] == 1
+    assert got["read_gap"] == 20
 
 
 def test_demand_matches_50ms_poll_gap(c_mailbox_bin: Path) -> None:

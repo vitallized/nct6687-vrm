@@ -221,14 +221,18 @@ def _vout_method(vout_mode: int, fallback_exp: int) -> str:
 
 
 def format_temp_probe(s: VrmSample, vals: dict[str, int]) -> str:
-    """0x8E controller die and 0x8F TEMP pin, beside the power-stage read."""
+    """0x8E controller die and 0x8F TEMP pin, beside the power-stage read.
+
+    Both words are LINEAR11 millisi from nct6687_vrm_port, same as the kernel's
+    0x8E decode. A signed 16-bit reading of 0x07FB is 2043, not −5 °C.
+    """
 
     def line(cmd: str, name: str, prefix: str) -> str:
         if not vals.get(f"{prefix}_ok"):
             return f"  {cmd} {name:<12} no answer"
         raw = vals.get(f"{prefix}_raw", 0)
-        signed = raw - 0x10000 if raw >= 0x8000 else raw
-        return f"  {cmd} {name:<12} {signed:6d} °C  RAW 0x{raw:04x}"
+        mc = vals.get(f"{prefix}_mc", 0)
+        return f"  {cmd} {name:<12} {mc / 1000:6.1f} °C  RAW 0x{raw:04x}"
 
     stage = f"  0x8D {'power stage':<12} {s.temp_c:6.1f} °C  RAW 0x{s.temp_raw:04x}"
     body = "\n".join(
@@ -243,7 +247,15 @@ def format_temp_probe(s: VrmSample, vals: dict[str, int]) -> str:
 
 
 def _sample_port(
-    base: int, addr: int, port: int, page: int, vout_exp: int, *, debug: bool, temps: bool
+    base: int,
+    addr: int,
+    port: int,
+    page: int,
+    vout_exp: int,
+    *,
+    debug: bool,
+    temps: bool,
+    force: bool = False,
 ) -> tuple[VrmSample, dict[str, int]]:
     """One PAGE sample through the C mailbox on /dev/port."""
     cmd = [
@@ -263,6 +275,8 @@ def _sample_port(
         cmd.append("--raw")
     if temps:
         cmd.append("--temps")
+    if force:
+        cmd.append("--force")
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         err = proc.stderr.strip() or "PAGE sample failed"
@@ -358,6 +372,7 @@ def main() -> int:
                         vout_exp,
                         debug=args.raw,
                         temps=args.temps,
+                        force=args.force,
                     )
                     samples.append(sample)
                     probes.append(vals)

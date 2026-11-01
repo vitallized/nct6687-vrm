@@ -111,13 +111,13 @@ def test_missing_tree_file_after_solo_pre_transaction(world: World) -> None:
     assert not h.ok
 
 
-def test_stock_tree_skips_tree_checks(world: World) -> None:
+def test_stock_tree_is_not_healthy(world: World) -> None:
     tree.restore(world.src)
     tree.backup_path(world.src).unlink()
     h = world.probe()
     assert not h.spliced
     assert h.tree == []
-    assert h.ok
+    assert not h.ok
 
 
 def test_payload_stale_against_source_repo(world: World) -> None:
@@ -140,6 +140,21 @@ def test_payload_not_installed(world: World, tmp_path: Path) -> None:
     h = world.probe(lib=tmp_path / "empty-lib")
     assert not h.payload_installed
     assert not h.ok
+
+
+def test_spliced_without_backup_checks_the_driver(world: World) -> None:
+    tree.backup_path(world.src).unlink()
+    h = world.probe()
+    assert h.spliced
+    assert _state(h.tree, "nct6687.c") == health.STALE
+    assert not h.ok
+
+
+def test_installed_script_without_source_repo_does_not_compare_to_itself(world: World) -> None:
+    (world.layout.lib / "source.env").unlink()
+    h = world.probe(repo=world.layout.lib)
+    assert _state(h.payload, "nct6687_vrm_persist.py") == health.STALE
+    assert not h.payload_ok
 
 
 def test_without_source_repo_payload_compares_running_tree(world: World) -> None:

@@ -85,14 +85,29 @@ def is_overlay_extra(path: Path) -> bool:
     return path.name in manifest.DKMS_FILES or path.name.endswith(".pre-vrm")
 
 
+def _spliced_without_backup(pkg_dir: Path) -> bool:
+    src = pkg_dir / "nct6687.c"
+    if not src.is_file() or backup_path(src).is_file():
+        return False
+    try:
+        return splice.is_spliced(src.read_text())
+    except OSError:
+        return False
+
+
 def unowned_toplevel(pkg_dir: Path) -> list[Path]:
     """Top-level files in the DKMS tree that the installed package does not own."""
     owned = _pacman_owned_files()
     extras: list[Path] = []
+    keep_overlay = _spliced_without_backup(pkg_dir)
     if not pkg_dir.is_dir():
         return extras
     for child in sorted(pkg_dir.iterdir()):
         if not child.is_file():
+            continue
+        if keep_overlay and is_overlay_extra(child):
+            # No stock backup. Deleting the includes leaves a spliced nct6687.c
+            # that cannot build, and post_transaction may not run.
             continue
         rel = child.as_posix().lstrip("/")
         if owned and rel in owned:
@@ -102,6 +117,29 @@ def unowned_toplevel(pkg_dir: Path) -> list[Path]:
             continue
         extras.append(child)
     return extras
+
+
+def restore_spliced_before_clear(pkg_dirs: list[Path]) -> None:
+    """Put stock nct6687.c back before extras are deleted.
+
+    PostTransaction does not run when the pacman transaction fails. Clearing
+    the includes first would leave a spliced file that cannot build.
+    """
+    for pkg_dir in pkg_dirs:
+        src = pkg_dir / "nct6687.c"
+        if not src.is_file():
+            continue
+        bak = backup_path(src)
+        if not bak.is_file():
+            continue
+        try:
+            text = src.read_text()
+        except OSError:
+            continue
+        if not splice.is_spliced(text):
+            continue
+        shutil.copy2(bak, src)
+        print("Restored", src, "from", bak, "before upgrade clear")
 
 
 def clear_unowned(pkg_dirs: list[Path] | None = None) -> list[Path]:
@@ -433,11 +471,19 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
         print("Loaded stock nct6687 (no VRM patch in sources).")
 
 
-def want_vrm_enabled(cli_enable: bool) -> bool:
-    """CLI --enable-vrm wins; else honor /etc/modprobe.d/*nct6687* options."""
+def want_vrm_enabled(cli_enable: bool, modprobe_d: Path | None = None) -> bool:
+    """CLI --enable-vrm wins. Otherwise the last vrm= in lexical modprobe.d order.
+
+    A later file partially replaces an earlier one. The last token wins,
+    including a later line in the same file.
+    """
     if cli_enable:
         return True
-    for path in sorted(Path("/etc/modprobe.d").glob("*.conf")):
+    root = modprobe_d or Path("/etc/modprobe.d")
+    found: bool | None = None
+    if not root.is_dir():
+        return False
+    for path in sorted(root.glob("*.conf")):
         try:
             text = path.read_text()
         except OSError:
@@ -451,10 +497,10 @@ def want_vrm_enabled(cli_enable: bool) -> bool:
                 continue
             for tok in parts[2:]:
                 if tok in ("vrm=1", "vrm=Y", "vrm=y", "vrm=true"):
-                    return True
-                if tok in ("vrm=0", "vrm=N", "vrm=n", "vrm=false"):
-                    return False
-    return False
+                    found = True
+                elif tok in ("vrm=0", "vrm=N", "vrm=n", "vrm=false"):
+                    found = False
+    return bool(found)
 
 
 def reinject(src: Path, reload: bool, load_vrm: bool) -> None:

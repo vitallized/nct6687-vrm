@@ -137,6 +137,63 @@ def test_refresh_updates_etc_hooks_when_present(tmp_path: Path) -> None:
     assert stale.read_text() == (ROOT / "pacman-hook" / "nct6687-vrm-reinject.hook").read_text()
 
 
+def test_install_leaves_an_existing_vrm0_conf(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    layout.modprobe_d.mkdir(parents=True)
+    conf = layout.modprobe_d / "nct6687-vrm.conf"
+    conf.write_text("options nct6687 vrm=0\n")
+    persist.install(ROOT, layout)
+    assert conf.read_text() == "options nct6687 vrm=0\n"
+
+
+def test_want_vrm_later_file_wins(tmp_path: Path) -> None:
+    modprobe_d = tmp_path / "modprobe.d"
+    modprobe_d.mkdir()
+    (modprobe_d / "10-on.conf").write_text("options nct6687 vrm=1\n")
+    (modprobe_d / "20-off.conf").write_text("options nct6687 vrm=0\n")
+    assert tree.want_vrm_enabled(False, modprobe_d) is False
+    (modprobe_d / "20-off.conf").write_text("options nct6687 vrm=0\noptions nct6687 vrm=1\n")
+    assert tree.want_vrm_enabled(False, modprobe_d) is True
+    assert tree.want_vrm_enabled(True, modprobe_d) is True
+
+
+def test_pre_transaction_restores_spliced_source_before_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    persist.install(ROOT, layout)
+    pkg = tmp_path / "src"
+    pkg.mkdir()
+    stock = STOCK_R257.read_text()
+    src = pkg / "nct6687.c"
+    src.write_text(splice.apply(stock))
+    bak = tree.backup_path(src)
+    bak.write_text(stock)
+    (pkg / tree.INC_NAME).write_text("inc\n")
+    monkeypatch.setattr(tree, "_pacman_owned_files", lambda: set())
+    assert persist.pre_transaction(layout, ROOT, pkg_dirs=[pkg]) == 0
+    assert src.read_text() == stock
+    assert not (pkg / tree.INC_NAME).exists()
+    assert not bak.exists()
+
+
+def test_pre_transaction_keeps_includes_when_spliced_without_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    persist.install(ROOT, layout)
+    pkg = tmp_path / "src"
+    pkg.mkdir()
+    src = pkg / "nct6687.c"
+    src.write_text(splice.apply(STOCK_R257.read_text()))
+    inc = pkg / tree.INC_NAME
+    inc.write_text("inc\n")
+    monkeypatch.setattr(tree, "_pacman_owned_files", lambda: set())
+    assert persist.pre_transaction(layout, ROOT, pkg_dirs=[pkg]) == 0
+    assert inc.read_text() == "inc\n"
+    assert splice.is_spliced(src.read_text())
+
+
 def test_refresh_does_not_touch_modprobe_conf(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     persist.install(ROOT, layout)

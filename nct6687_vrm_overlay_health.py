@@ -59,7 +59,8 @@ class OverlayHealth:
     @property
     def ok(self) -> bool:
         return (
-            not self.unexpected_extras
+            self.spliced
+            and not self.unexpected_extras
             and self.tree_ok
             and self.payload_ok
             and not self.live_module_stock
@@ -71,6 +72,8 @@ def _compare(name: str, path: Path, reference: Path | None) -> FileHealth:
         return FileHealth(name, path, MISSING)
     if reference is None:
         return FileHealth(name, path, STALE, "no reference copy")
+    if path.resolve() == reference.resolve():
+        return FileHealth(name, path, STALE, "no SOURCE_REPO; compared to itself")
     if path.read_bytes() != reference.read_bytes():
         return FileHealth(name, path, STALE, f"differs from {reference}")
     return FileHealth(name, path, OK)
@@ -90,6 +93,7 @@ def _probe_tree(src: Path, repo: Path, lib: Path) -> list[FileHealth]:
     ]
     bak = tree.backup_path(src)
     if not bak.is_file():
+        out.append(FileHealth(src.name, src, STALE, "no .pre-vrm; hooks not checked"))
         return out
     patch = _reference(manifest.PATCH_NAME, repo, lib)
     try:

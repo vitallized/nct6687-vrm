@@ -63,7 +63,11 @@ static bool nct_vrm_should_sample(bool valid, bool demanded, bool last_read_set,
 	else
 		interval = floor;
 
-	return last_updated_age > interval;
+	/* Equal counts. last_updated and last_read are both jiffies, a few port
+	 * writes apart, so a steady poll sees age == gap. Strict > skips that
+	 * read and the next one samples, which is half the poll rate.
+	 */
+	return last_updated_age >= interval;
 }
 
 static int nct_vrm_bus_recover(struct nct6687_data* data)

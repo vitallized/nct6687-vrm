@@ -55,6 +55,9 @@ def print_health(h: overlay_health.OverlayHealth) -> int:
     """Print an OverlayHealth. Exit 1 if anything is stale, missing, or unowned."""
     print("DKMS source:", h.src)
     print("Injected:", h.spliced)
+    if not h.spliced:
+        print("DKMS source is not spliced. Re-splice with:")
+        print(" ", INSTALL_REMEDY)
     for f in h.tree:
         print(_line("DKMS tree", f))
     if not h.tree_ok:

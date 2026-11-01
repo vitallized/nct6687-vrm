@@ -162,9 +162,9 @@ def pre_transaction(
         print("persist: missing payload — skip pre-upgrade clear", file=sys.stderr)
         return 0
     tree = _tree()
-    removed = tree.clear_unowned(
-        pkg_dirs if pkg_dirs is not None else tree.src_dirs(layout.src_globs)
-    )
+    dirs = pkg_dirs if pkg_dirs is not None else tree.src_dirs(layout.src_globs)
+    tree.restore_spliced_before_clear(dirs)
+    removed = tree.clear_unowned(dirs)
     if not removed:
         print("No unowned files to remove")
     return 0
@@ -218,8 +218,12 @@ def install(repo: Path | None = None, layout: PersistLayout | None = None) -> No
         shutil.copy2(repo / f.rel, layout.lib / f.name)
     (layout.lib / "source.env").write_text(f"SOURCE_REPO={repo}\n")
     for f in PAYLOAD:
-        if f.etc:
-            shutil.copy2(layout.lib / f.name, getattr(layout, f.etc) / f.name)
+        if not f.etc:
+            continue
+        dest = getattr(layout, f.etc) / f.name
+        if f.etc == "modprobe_d" and dest.is_file():
+            continue
+        shutil.copy2(layout.lib / f.name, dest)
     print("Installed persist payload in", layout.lib)
     print("Hooks:", layout.hook_dir / "nct6687-vrm-preupgrade.hook")
     print("       ", layout.hook_dir / "nct6687-vrm-reinject.hook")

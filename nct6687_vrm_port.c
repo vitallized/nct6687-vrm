@@ -17,6 +17,7 @@
 
 #include "dkms/nct6687_vrm_mux.h"
 
+#ifndef NCT_VRM_PORT_TEST
 static int port_fd = -1;
 
 void nct_vrm_host_outb(u16 port, u8 val)
@@ -47,6 +48,7 @@ void nct_vrm_host_usleep_range(unsigned min_us, unsigned max_us)
 	(void)max_us;
 	usleep(min_us ? min_us : 1);
 }
+#endif
 
 struct port_job {
 	u8 addr;
@@ -102,23 +104,18 @@ static int port_body(struct nct6687_data* data, void* vctx)
 		if (job->rc)
 			return job->rc;
 	}
+	/* CAP 0x19 / STATUS 0x78 stay in the body. The after hook is past the
+	 * SMB disable, and a read there leaves EN set across the mux restore.
+	 */
+	if (job->debug) {
+		if (nct_vrm_read_byte(data, job->addr, 0x19, job->cap) ||
+			nct_vrm_read_byte(data, job->addr, 0x78, job->status)) {
+			job->rc = -EIO;
+			return -EIO;
+		}
+	}
 	*job->vout_mode = data->vrm_vout_mode_valid[job->page]
 		? data->vrm_vout_mode_cache[job->page] : 0;
-	return 0;
-}
-
-/* CAP 0x19 / STATUS 0x78. After SMB disable, before mux restore. */
-static int port_debug(struct nct6687_data* data, void* vctx)
-{
-	struct port_job* job = vctx;
-
-	if (!job->debug)
-		return 0;
-	if (nct_vrm_read_byte(data, job->addr, 0x19, job->cap) ||
-		nct_vrm_read_byte(data, job->addr, 0x78, job->status)) {
-		job->rc = -EIO;
-		return -EIO;
-	}
 	return 0;
 }
 
@@ -141,7 +138,7 @@ static int mux_sample(struct nct6687_data* data, u8 addr, unsigned port_mux, u8 
 	};
 	enum nct_vrm_mux_phase phase;
 
-	phase = nct_vrm_mux_cycle(data, port_mux, port_body, port_debug,
+	phase = nct_vrm_mux_cycle(data, port_mux, port_body, NULL,
 		nct_vrm_recover, &job, NCT_VRM_MUX_FAIL_DISABLES);
 	*temp2_ok = job.temp2_ok;
 	*temp2_raw = job.temp2_raw;
@@ -154,11 +151,37 @@ static int mux_sample(struct nct6687_data* data, u8 addr, unsigned port_mux, u8 
 	return -EIO;
 }
 
+#ifdef NCT_VRM_PORT_TEST
+/* Host harness calls this. Same sequence as main, without /dev/port. */
+int nct_vrm_port_trace(int debug, unsigned char* cap, unsigned char* status)
+{
+	struct nct6687_data data;
+	long sample[NCT_VRM_NMETRIC];
+	u16 raw[NCT_VRM_NMETRIC];
+	u8 vout_mode = 0;
+	int temp2_ok = 0, temp3_ok = 0;
+	u16 temp2_raw = 0, temp3_raw = 0;
+
+	memset(&data, 0, sizeof(data));
+	data.addr = 0xa20;
+	data.vrm_smbus_page = -1;
+	return mux_sample(&data, 0xc0, 0, 0, -10, debug, 0, sample, raw, &vout_mode,
+		cap, status, &temp2_ok, &temp2_raw, &temp3_ok, &temp3_raw);
+}
+#endif
+
+/* Loaded nct6687.ko shares the eSIO window. --force is the one-shot escape. */
+int nct_vrm_port_refuse(int loaded, int force)
+{
+	return loaded && !force;
+}
+
+#ifndef NCT_VRM_PORT_TEST
 static void usage(void)
 {
 	fprintf(stderr,
 		"usage: nct6687_vrm_port --base HEX --addr HEX --port 0|1 --page 0|1 "
-		"--vout-exp N [--raw] [--temps]\n");
+		"--vout-exp N [--raw] [--temps] [--force]\n");
 }
 
 int main(int argc, char** argv)
@@ -167,7 +190,7 @@ int main(int argc, char** argv)
 	long sample[NCT_VRM_NMETRIC];
 	u16 raw[NCT_VRM_NMETRIC];
 	unsigned base = 0xa20, addr = 0xc0, port_mux = 0, page = 0;
-	int vout_exp = -10, debug = 0, temps = 0, i, rc;
+	int vout_exp = -10, debug = 0, temps = 0, force = 0, i, rc;
 	int temp2_ok = 0, temp3_ok = 0;
 	u16 temp2_raw = 0, temp3_raw = 0;
 	u8 cap = 0, status = 0, vout_mode = 0;
@@ -177,6 +200,8 @@ int main(int argc, char** argv)
 			debug = 1;
 		} else if (!strcmp(argv[i], "--temps")) {
 			temps = 1;
+		} else if (!strcmp(argv[i], "--force")) {
+			force = 1;
 		} else if (i + 1 >= argc) {
 			usage();
 			return 2;
@@ -198,6 +223,10 @@ int main(int argc, char** argv)
 	if (page > 1 || port_mux > 1) {
 		usage();
 		return 2;
+	}
+	if (nct_vrm_port_refuse(access("/sys/module/nct6687", F_OK) == 0, force)) {
+		fprintf(stderr, "Refusing: nct6687.ko is loaded (shares eSIO base+4..+6)\n");
+		return 3;
 	}
 
 	memset(&data, 0, sizeof(data));
@@ -245,8 +274,13 @@ int main(int argc, char** argv)
 	if (temps) {
 		printf("temp2_ok=%d\n", temp2_ok);
 		printf("temp2_raw=%u\n", temp2_raw);
+		if (temp2_ok)
+			printf("temp2_mc=%ld\n", nct_vrm_linear11_milli(temp2_raw));
 		printf("temp3_ok=%d\n", temp3_ok);
 		printf("temp3_raw=%u\n", temp3_raw);
+		if (temp3_ok)
+			printf("temp3_mc=%ld\n", nct_vrm_linear11_milli(temp3_raw));
 	}
 	return 0;
 }
+#endif

@@ -49,9 +49,15 @@ def test_data_header_inside_struct_before_update_lock(spliced: str) -> None:
 def test_ec_window_locked_again(spliced: str) -> None:
     read = _func(spliced, "static u16 nct6687_read(struct nct6687_data *data, u16 address)")
     write = _func(spliced, "static void nct6687_write(struct nct6687_data *data, u16 address, u16 value)")
-    for body in (read, write):
+    pair = _func(spliced, "static void nct6687_read_pair(struct nct6687_data *data, u16 reg, u16 *first, u16 *second)")
+    read16 = _func(spliced, "static u16 nct6687_read16(struct nct6687_data *data, u16 reg)")
+    for body in (read, write, pair):
         assert body.count("mutex_lock(&data->EC_io_lock);") == 1
         assert body.count("mutex_unlock(&data->EC_io_lock);") == 1
+    assert pair.count("nct6687_read_nolock") == 2
+    assert "nct6687_read(" not in read16
+    assert "nct6687_read_pair" in read16
+    assert spliced.count("nct6687_read_pair") >= 5
     assert spliced.count("mutex_init(&data->EC_io_lock);") == 1
 
 
