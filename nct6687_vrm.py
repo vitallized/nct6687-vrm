@@ -131,11 +131,13 @@ def userspace_guard(*, loaded: bool, force: bool, looping: bool) -> str | None:
     return None
 
 
-def _port_bin() -> Path:
-    root = Path(__file__).resolve().parent
+def _port_bin(root: Path | None = None) -> Path:
+    root = root or Path(__file__).resolve().parent
     src = root / "nct6687_vrm_port.c"
     out = root / "nct6687_vrm_port"
-    if not out.exists() or out.stat().st_mtime < src.stat().st_mtime:
+    # The mailbox and mux live in dkms/*.h. A header fix must rebuild too.
+    newest = max(p.stat().st_mtime for p in [src, *root.glob("dkms/*.h")])
+    if not out.exists() or out.stat().st_mtime < newest:
         subprocess.check_call(
             [
                 "cc",

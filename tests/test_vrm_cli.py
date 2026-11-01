@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict
@@ -10,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import nct6687_vrm as vrm  # noqa: E402
+import nct6687_vrm as vrm
 
 # nct6687_vrm_port.c stdout. Millisi are already decoded; raw words are separate.
 _PORT_STDOUT = """\
@@ -112,3 +113,31 @@ def test_port_text_json_emits_millisi() -> None:
     assert data["temp_mc"] == 40000
     assert data["vout_raw"] == 229
     assert "sts_page_wr" not in data
+
+
+def _port_tree(tmp_path: Path, *, bin_mtime: int, c_mtime: int, h_mtime: int) -> Path:
+    (tmp_path / "dkms").mkdir()
+    for path, mtime in (
+        (tmp_path / "nct6687_vrm_port.c", c_mtime),
+        (tmp_path / "dkms" / "nct6687_vrm_mux.h", h_mtime),
+        (tmp_path / "nct6687_vrm_port", bin_mtime),
+    ):
+        path.write_text("")
+        os.utime(path, (mtime, mtime))
+    return tmp_path
+
+
+def test_port_bin_rebuilds_when_a_dkms_header_is_newer(tmp_path, monkeypatch) -> None:
+    root = _port_tree(tmp_path, bin_mtime=200, c_mtime=100, h_mtime=300)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(vrm.subprocess, "check_call", calls.append)
+    vrm._port_bin(root)
+    assert len(calls) == 1
+
+
+def test_port_bin_keeps_a_binary_newer_than_every_source(tmp_path, monkeypatch) -> None:
+    root = _port_tree(tmp_path, bin_mtime=300, c_mtime=100, h_mtime=200)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(vrm.subprocess, "check_call", calls.append)
+    vrm._port_bin(root)
+    assert calls == []

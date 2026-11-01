@@ -421,7 +421,7 @@ def rebuild(src: Path, reload: bool, load_vrm: bool = False) -> None:
             if kver == current:
                 raise SystemExit(
                     f"DKMS failed for running kernel {kver} (rc={e.returncode}). "
-                    "See /var/lib/dkms/{pname}/{pver}/build/make.log"
+                    f"See /var/lib/dkms/{pname}/{pver}/build/make.log"
                 ) from e
             print(
                 f"WARNING: DKMS failed for {kver} (rc={e.returncode}); "

@@ -1,7 +1,6 @@
 __pycache__/
 .pytest_cache/
 *.py[cod]
-.pytest_cache/
 .vrm-verify-build/
 *.ko
 *.o
