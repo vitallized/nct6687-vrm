@@ -117,10 +117,10 @@ static long nct_vrm_decode_iin_ma(u16 iin)
 	return nct_vrm_i16(iin) * 10L;
 }
 
-/* READ_PIN Direct, 1 W/LSB → microwatts. */
+/* READ_PIN Direct, 1 W/LSB, two's complement. 0xFFFF is -1 W, not 65535 W. */
 static long nct_vrm_decode_pin_uw(u16 pin)
 {
-	return (long)pin * 1000000L;
+	return nct_vrm_i16(pin) * 1000000L;
 }
 
 /*
@@ -155,6 +155,92 @@ static long nct_vrm_efficiency_pwm(long pout_uw, long pin_uw)
 	if (pct > 100L)
 		pct = 100L;
 	return pct * 2L;
+}
+
+/* About 10 s, so a 1 Hz poll still averages many samples.
+ * A gap longer than IDLE means sampling stopped.
+ * REJECT is times 100 (250 = 2.5x). 10000 disables it for real VR spikes.
+ */
+#define NCT_VRM_EFF_TAU_MS 10000UL
+#define NCT_VRM_EFF_IDLE_MS 5000UL
+#define NCT_VRM_EFF_REJECT_X100 10000UL
+
+static void nct_vrm_eff_reset(bool* init)
+{
+	*init = false;
+}
+
+static long nct_vrm_eff_blend(long prev, long sample, unsigned long dt_ms,
+	unsigned long tau_ms)
+{
+	if (dt_ms == 0)
+		return prev;
+	return prev + (long)(((long long)(sample - prev) * (long long)dt_ms) /
+		(long long)(tau_ms + dt_ms));
+}
+
+/* 0 when the two powers differ by more than x100/100, or either is not positive. */
+static int nct_vrm_eff_agree_x100(long pout_uw, long pin_uw, unsigned long x100)
+{
+	if (pout_uw <= 0 || pin_uw <= 0 || x100 == 0)
+		return 0;
+	if ((long long)pout_uw * 100 > (long long)pin_uw * (long long)x100)
+		return 0;
+	if ((long long)pin_uw * 100 > (long long)pout_uw * (long long)x100)
+		return 0;
+	return 1;
+}
+
+static int nct_vrm_eff_agree(long pout_uw, long pin_uw)
+{
+	return nct_vrm_eff_agree_x100(pout_uw, pin_uw, NCT_VRM_EFF_REJECT_X100);
+}
+
+/* Seed on the first positive pair and after a long gap. Otherwise blend.
+ * A negative power is not a sample: the average stays, unless the gap
+ * since the last accepted pair is already past IDLE, in which case it
+ * clears. A sample past NCT_VRM_EFF_REJECT_X100 is ignored and does not
+ * refresh the idle timer. The default constant is wide enough that real
+ * spikes pass. Either power <= 0 still fails nct_vrm_eff_agree.
+ */
+static void nct_vrm_eff_update(bool* init, long* pout, long* pin,
+	unsigned long* at_ms, long sample_pout, long sample_pin,
+	unsigned long now_ms)
+{
+	unsigned long dt;
+
+	if (sample_pout < 0 || sample_pin < 0) {
+		if (*init && now_ms - *at_ms > NCT_VRM_EFF_IDLE_MS)
+			nct_vrm_eff_reset(init);
+		return;
+	}
+	if (!*init || now_ms - *at_ms > NCT_VRM_EFF_IDLE_MS) {
+		*pout = sample_pout;
+		*pin = sample_pin;
+		*at_ms = now_ms;
+		*init = true;
+		return;
+	}
+	if (!nct_vrm_eff_agree(sample_pout, sample_pin))
+		return;
+	dt = now_ms - *at_ms;
+	*pout = nct_vrm_eff_blend(*pout, sample_pout, dt, NCT_VRM_EFF_TAU_MS);
+	*pin = nct_vrm_eff_blend(*pin, sample_pin, dt, NCT_VRM_EFF_TAU_MS);
+	*at_ms = now_ms;
+}
+
+/* 1 and *pwm set. 0 when there is no reading. POUT above PIN stays at the 100% cap. */
+static int nct_vrm_eff_publish(bool init, long pout_uw, long pin_uw, long* pwm)
+{
+	long v;
+
+	if (!init)
+		return 0;
+	v = nct_vrm_efficiency_pwm(pout_uw, pin_uw);
+	if (v <= 0)
+		return 0;
+	*pwm = v;
+	return 1;
 }
 
 #endif

@@ -33,6 +33,11 @@ static unsigned long nct_vrm_now(void)
     return jiffies;
 }
 
+static unsigned long nct_vrm_eff_now_ms(void)
+{
+    return jiffies_to_msecs(jiffies);
+}
+
 static void nct_vrm_ec_lock(struct nct6687_data* data)
 {
     mutex_lock(&data->EC_io_lock);
@@ -48,6 +53,32 @@ static void nct_vrm_warn_recover(void)
     pr_warn_ratelimited("nct6687: VRM recover failed\n");
 }
 
+static void nct_vrm_note_negative(int metric, long val)
+{
+    const char* what = "reading";
+    const char* unit = "";
+
+    switch (metric) {
+    case NCT_VRM_IOUT:
+        what = "IOUT";
+        unit = "mA";
+        break;
+    case NCT_VRM_IIN:
+        what = "IIN";
+        unit = "mA";
+        break;
+    case NCT_VRM_POUT:
+        what = "POUT";
+        unit = "uW";
+        break;
+    case NCT_VRM_PIN:
+        what = "PIN";
+        unit = "uW";
+        break;
+    }
+    pr_warn_ratelimited("nct6687: VRM %s %ld %s not published\n", what, val, unit);
+}
+
 #include "nct6687_vrm_demand.h"
 
 /* One session at a time. The demand flag is set and consumed under this lock
@@ -61,6 +92,10 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_demand = false;
     data->vrm_last_updated = 0;
     data->vrm_last_read = 0;
+    nct_vrm_eff_reset(&data->vrm_eff_init);
+    data->vrm_eff_pout_uw = 0;
+    data->vrm_eff_pin_uw = 0;
+    data->vrm_eff_at_ms = 0;
     data->vrm_read_gap = 0;
     data->vrm_fail_count = 0;
     data->vrm_gt_fails = 0;
@@ -89,6 +124,7 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
 #define NCT_VRM_MOS_CH 2
 #define NCT_VRM_MOS_NR 100
 #define NCT_VRM_CTRL_NR 101
+#define NCT_VRM_FULL_NR 102
 
 static bool nct_vrm_mos_present(void)
 {
@@ -126,9 +162,11 @@ static void nct_vrm_sample_mos(struct nct6687_data* data)
     nct_vrm_note_mos(data);
 }
 
-static void nct_vrm_locked(struct nct6687_data* data, bool demand)
+/* page0, when non-NULL, receives the CPU rail under this lock. -ENODATA if invalid. */
+static int nct_vrm_locked(struct nct6687_data* data, bool demand, long* page0)
 {
     unsigned long floor;
+    int rc = 0;
 
     mutex_lock(&nct_vrm_session_lock);
     if (demand)
@@ -147,7 +185,14 @@ static void nct_vrm_locked(struct nct6687_data* data, bool demand)
         vrm_gt);
     if (demand)
         data->vrm_last_read = jiffies;
+    if (page0) {
+        if (!data->vrm_rail[0].valid)
+            rc = -ENODATA;
+        else
+            memcpy(page0, data->vrm_rail[0].val, sizeof(data->vrm_rail[0].val));
+    }
     mutex_unlock(&nct_vrm_session_lock);
+    return rc;
 }
 
 static void nct6687_update_vrm(struct nct6687_data* data)
@@ -156,7 +201,7 @@ static void nct6687_update_vrm(struct nct6687_data* data)
         return;
 
     /* Background hook. Demand flag stays clear, so the session keeps 1 Hz. */
-    nct_vrm_locked(data, false);
+    nct_vrm_locked(data, false, NULL);
 }
 
 static struct nct6687_data* nct_vrm_touch_and_update(struct device* dev)
@@ -173,7 +218,7 @@ static struct nct6687_data* nct_vrm_touch_and_update(struct device* dev)
      * first-ever / idle demand sees last_read==0 or the real gap.
      */
     if (data->vrm_enabled)
-        nct_vrm_locked(data, true);
+        nct_vrm_locked(data, true, NULL);
     else
         data->vrm_last_read = jiffies;
     return data;
@@ -188,6 +233,22 @@ static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, c
         return -ENODATA;
     return sprintf(buf, "%ld %ld %ld\n", cpu->val[NCT_VRM_VOUT],
         cpu->val[NCT_VRM_IOUT], cpu->val[NCT_VRM_POUT]);
+}
+
+/* VOUT VIN IOUT IIN POUT PIN from the CPU rail, copied before the lock drops. */
+static ssize_t vrm_cpu_full_show(struct device* dev, struct device_attribute* attr, char* buf)
+{
+    struct nct6687_data* data = dev_get_drvdata(dev);
+    long page0[NCT_VRM_NMETRIC];
+    int rc;
+
+    (void)attr;
+    if (!data->vrm_enabled)
+        return -ENODATA;
+    rc = nct_vrm_locked(data, true, page0);
+    if (rc)
+        return rc;
+    return nct_vrm_format_cpu_full(buf, page0);
 }
 
 /*
@@ -270,10 +331,8 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
     if (ch->metric == NCT_VRM_EFF) {
         if (sattr->index != NCT_VRM_INPUT)
             return -EINVAL;
-        if (!r->valid)
-            return -ENODATA;
-        val = nct_vrm_efficiency_pwm(r->val[NCT_VRM_POUT], r->val[NCT_VRM_PIN]);
-        if (val <= 0)
+        if (!nct_vrm_eff_publish(data->vrm_eff_init, data->vrm_eff_pout_uw,
+                data->vrm_eff_pin_uw, &val))
             return -ENODATA;
         return sprintf(buf, "%ld\n", val);
     }
@@ -305,6 +364,8 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
 
 static SENSOR_DEVICE_ATTR_2(vrm_cpu, 0444, vrm_cpu_show, NULL,
     NCT_VRM_CPU_VOUT, NCT_VRM_INPUT);
+static SENSOR_DEVICE_ATTR_2(vrm_cpu_full, 0444, vrm_cpu_full_show, NULL,
+    NCT_VRM_FULL_NR, NCT_VRM_INPUT);
 NCT_VRM_ATTR(in20_input, NCT_VRM_CPU_VOUT, NCT_VRM_INPUT);
 NCT_VRM_ATTR(in20_label, NCT_VRM_CPU_VOUT, NCT_VRM_LABEL);
 NCT_VRM_ATTR(in20_min, NCT_VRM_CPU_VOUT, NCT_VRM_MIN);
@@ -439,6 +500,7 @@ static umode_t nct6687_vrm_attr_is_visible(struct kobject* kobj,
 
 static struct attribute* nct6687_vrm_attrs[] = {
     &sensor_dev_attr_vrm_cpu.dev_attr.attr,
+    &sensor_dev_attr_vrm_cpu_full.dev_attr.attr,
     &sensor_dev_attr_in20_input.dev_attr.attr,
     &sensor_dev_attr_in20_label.dev_attr.attr,
     &sensor_dev_attr_in20_min.dev_attr.attr,

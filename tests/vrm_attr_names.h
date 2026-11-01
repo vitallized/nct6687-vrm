@@ -19,6 +19,7 @@
 
 static const char* const nct_vrm_published_attr_names[] = {
 	"vrm_cpu",
+	"vrm_cpu_full",
 	"in20_input",
 	"in20_label",
 	"in20_min",

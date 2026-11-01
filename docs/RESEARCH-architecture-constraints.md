@@ -165,7 +165,7 @@ Linux `isl68137.c` DMPVR2 coefficients (src, matches that datasheet):
 | VOUT `0x40` → mV | Used on MS-7D89 | ISL68229: VOUT_MODE default `40h` = Direct 1 mV/LSB. **Family datasheet agrees.** |
 | VIN raw × 10 | Direct m=1, R=2 | ISL68229 + isl68137 agree. |
 | POUT / TEMP LINEAR11 | PROTOCOL | **Family datasheet + isl68137: Direct, not LINEAR11.** When N=0, LINEAR11 `0x0029` and Direct `0x0029` both read as 41 — **local sample cannot distinguish.** |
-| IOUT / IIN / PIN | `READ_IOUT` Direct 0.1 A/LSB (`raw * 100` mA). `READ_IIN` Direct 0.01 A/LSB (`raw * 10` mA). `READ_PIN` Direct 1 W/LSB (`raw * 1000000` µW). Sample order is TEMP `0x8D`, VOUT `0x8B`, VIN `0x88`, IOUT `0x8C`, IIN `0x89`, POUT `0x96`, PIN `0x97`. | IOUT datasheet: Direct 0.1 A/LSB (`0x00E5` → 22.9 A). LINEAR11 of that word is nonsense (~229 A if N=0). IIN/PIN scales are the DMPVR2 family Direct coefficients. |
+| IOUT / IIN / PIN | `READ_IOUT` Direct 0.1 A/LSB (`raw * 100` mA). `READ_IIN` Direct 0.01 A/LSB (`raw * 10` mA). `READ_PIN` Direct 1 W/LSB, two's complement (`nct_vrm_i16(raw) * 1000000` µW; `0xFFFF` is −1 W). Sample order is TEMP `0x8D`, VOUT `0x8B`, VIN `0x88`, IOUT `0x8C`, IIN `0x89`, POUT `0x96`, PIN `0x97`. | IOUT datasheet: Direct 0.1 A/LSB (`0x00E5` → 22.9 A). LINEAR11 of that word is nonsense (~229 A if N=0). IIN/PIN scales are the DMPVR2 family Direct coefficients. |
 
 **inf:** Treat MS-7D89 scalings as **DMPVR2-family** unless a RAA229131 PDF appears. PROTOCOL already warns Direct `m/R` are board-specific; POUT/TEMP-as-LINEAR11 is the weaker claim against the public family datasheet.
 

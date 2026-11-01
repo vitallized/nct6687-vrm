@@ -33,7 +33,7 @@ The members that live on `nct6687_data` for VRM cache, hist, and PAGE/VOUT_MODE 
 _Avoid_: STRUCT_FIELDS, Python field list
 
 **software hist**:
-Per-device min/max of PAGE samples, plus the stock VRM MOS thermistor (`temp3`). IOUT, IIN (mA) and POUT, PIN (µW) drop a negative millisi sample. POUT can still be a LINEAR11 spike. The current and PIN reads are unsigned Direct, so that drop is only a guard. VOUT/VIN/TEMP still take the signed value. POUT and PIN are published as `power*_input_lowest` / `power*_input_highest` so `sensors` prints lowest then highest.
+Per-device min/max of PAGE samples, plus the stock VRM MOS thermistor (`temp3`). A negative IOUT, IIN, POUT, or PIN is logged and not published; the live value stays at the last non-negative reading, so it cannot become the high. IOUT, IIN, and PIN are two's complement Direct. POUT can still be a LINEAR11 spike. VOUT/VIN/TEMP still take the signed value. POUT and PIN are published as `power*_input_lowest` / `power*_input_highest` so `sensors` prints lowest then highest.
 _Avoid_: hwmon chip min
 
 **VRM demand**:

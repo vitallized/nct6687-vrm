@@ -89,7 +89,7 @@ def _demand(
 def test_vrm_sysfs_poll_samples_mos_thermistor() -> None:
     text = (Path(__file__).resolve().parents[1] / "dkms" / "nct6687_vrm.inc.c").read_text()
     touch = text.split("nct_vrm_touch_and_update", 1)[1].split("\n}", 1)[0]
-    locked = text.split("static void nct_vrm_locked", 1)[1].split("\n}", 1)[0]
+    locked = text.split("static int nct_vrm_locked", 1)[1].split("\n}", 1)[0]
     sample = text.split("static void nct_vrm_sample_mos", 1)[1].split("\n}", 1)[0]
     assert "nct_vrm_locked" in touch
     assert "vrm_demand = true" in locked

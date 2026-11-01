@@ -11,6 +11,11 @@
 	bool vrm_demand;
 	unsigned long vrm_last_updated;
 	unsigned long vrm_last_read;
+	/* Efficiency uses these, not the latest POUT/PIN words. */
+	bool vrm_eff_init;
+	long vrm_eff_pout_uw;
+	long vrm_eff_pin_uw;
+	unsigned long vrm_eff_at_ms;
 	unsigned long vrm_read_gap;
 	unsigned vrm_fail_count;
 	/* PAGE 1 only. A GT miss backs off without slowing the CPU rail. */

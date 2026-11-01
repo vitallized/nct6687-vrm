@@ -23,6 +23,7 @@
 #include "nct6687_vrm_hist.h"
 
 static unsigned long nct_vrm_now(void);
+static unsigned long nct_vrm_eff_now_ms(void);
 static void nct_vrm_ec_lock(struct nct6687_data* data);
 static void nct_vrm_ec_unlock(struct nct6687_data* data);
 static void nct_vrm_warn_recover(void);
@@ -94,6 +95,7 @@ static int nct_vrm_demand_fail(struct nct6687_data* data)
 	data->vrm_rail[0].valid = false;
 	data->vrm_rail[1].valid = false;
 	data->vrm_ctrl_valid = false;
+	nct_vrm_eff_reset(&data->vrm_eff_init);
 	data->vrm_last_updated = nct_vrm_now();
 	data->vrm_fail_count++;
 	if (nct_vrm_bus_recover(data))
@@ -123,6 +125,10 @@ static int nct_vrm_demand_body(struct nct6687_data* data, void* vctx)
 	}
 
 	nct_vrm_rail_apply(cpu, job->sample);
+	nct_vrm_eff_update(&data->vrm_eff_init, &data->vrm_eff_pout_uw,
+		&data->vrm_eff_pin_uw, &data->vrm_eff_at_ms,
+		job->sample[NCT_VRM_POUT], job->sample[NCT_VRM_PIN],
+		nct_vrm_eff_now_ms());
 	data->vrm_last_updated = nct_vrm_now();
 
 	/* GT failure after a good CPU sample keeps CPU valid and does not
@@ -195,6 +201,7 @@ static void nct_vrm_demand_session(struct nct6687_data* data, unsigned long hz,
 		cpu->valid = false;
 		gt->valid = false;
 		data->vrm_ctrl_valid = false;
+		nct_vrm_eff_reset(&data->vrm_eff_init);
 		data->vrm_fail_count++;
 		break;
 	case NCT_VRM_MUX_SAVE:

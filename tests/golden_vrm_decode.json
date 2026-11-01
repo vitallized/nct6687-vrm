@@ -87,6 +87,15 @@
       "note": "READ_PIN Direct 1 W/LSB: 0x0065 \u2192 101*1000000 = 101000000 uW"
     },
     {
+      "name": "pin_direct_0xFFFF",
+      "fn": "decode_pin_uw",
+      "args": [
+        65535
+      ],
+      "expect": -1000000,
+      "note": "READ_PIN two's complement: 0xFFFF is -1 W, not 65535 W (sensors 65.53 kW)."
+    },
+    {
       "name": "efficiency_36w_over_61w",
       "fn": "efficiency_pcm",
       "args": [

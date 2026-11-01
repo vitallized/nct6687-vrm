@@ -25,6 +25,11 @@ static unsigned long nct_vrm_now(void)
 	return demand_now;
 }
 
+static unsigned long nct_vrm_eff_now_ms(void)
+{
+	return demand_now;
+}
+
 static void nct_vrm_ec_lock(struct nct6687_data* data)
 {
 	(void)data;
@@ -37,6 +42,12 @@ static void nct_vrm_ec_unlock(struct nct6687_data* data)
 
 static void nct_vrm_warn_recover(void)
 {
+}
+
+static void nct_vrm_note_negative(int metric, long val)
+{
+	(void)metric;
+	(void)val;
 }
 
 /* Direct nct_vrm_mux_cycle. Rail 0 valid is what the checked restore's host

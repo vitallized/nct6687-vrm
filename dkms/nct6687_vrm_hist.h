@@ -2,13 +2,23 @@
  *
  * One place remembers min/max. The demand session decides when a PAGE sample
  * is stored. The MOS note is the stock temp3 reading, not a PMBus register.
- * IOUT/IIN/POUT/PIN drop a negative millisi sample. VOUT/VIN/TEMP and the MOS
- * reading keep the signed value.
+ * IOUT/IIN/POUT/PIN: a negative is logged and not published. The live value
+ * stays at the last non-negative reading (0 if there has not been one).
+ * VOUT/VIN/TEMP and the MOS reading keep the signed value.
  */
 #ifndef NCT6687_VRM_HIST_H
 #define NCT6687_VRM_HIST_H
 
 #include "nct6687_vrm_decode.h"
+
+/* Kernel logs it. Host tests count it. Defined by the translation unit. */
+static void nct_vrm_note_negative(int metric, long val);
+
+static bool nct_vrm_drops_negative(int metric)
+{
+	return metric == NCT_VRM_IOUT || metric == NCT_VRM_POUT ||
+		metric == NCT_VRM_IIN || metric == NCT_VRM_PIN;
+}
 
 static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
 {
@@ -34,9 +44,19 @@ static void nct_vrm_hist_add(long* min, long* max, bool* init, long val,
 static void nct_vrm_rail_apply(struct nct_vrm_rail* r,
 	const long sample[NCT_VRM_NMETRIC])
 {
+	long pub[NCT_VRM_NMETRIC];
 	bool first = !r->hist_init;
+	int m;
 
-	memcpy(r->val, sample, sizeof(r->val));
+	for (m = 0; m < NCT_VRM_NMETRIC; m++) {
+		if (nct_vrm_drops_negative(m) && sample[m] < 0) {
+			nct_vrm_note_negative(m, sample[m]);
+			pub[m] = r->val[m];
+		} else {
+			pub[m] = sample[m];
+		}
+	}
+	memcpy(r->val, pub, sizeof(r->val));
 	r->valid = true;
 	nct_vrm_hist_point(&r->min[NCT_VRM_VOUT], &r->max[NCT_VRM_VOUT],
 		sample[NCT_VRM_VOUT], first);
@@ -53,6 +73,14 @@ static void nct_vrm_rail_apply(struct nct_vrm_rail* r,
 	nct_vrm_hist_add(&r->min[NCT_VRM_PIN], &r->max[NCT_VRM_PIN],
 		&r->pin_hist_init, sample[NCT_VRM_PIN], true);
 	r->hist_init = true;
+}
+
+/* PAGE 0 snapshot: VOUT VIN IOUT IIN POUT PIN. One line, millisi units. */
+static int nct_vrm_format_cpu_full(char* buf, const long* v)
+{
+	return sprintf(buf, "%ld %ld %ld %ld %ld %ld\n",
+		v[NCT_VRM_VOUT], v[NCT_VRM_VIN], v[NCT_VRM_IOUT], v[NCT_VRM_IIN],
+		v[NCT_VRM_POUT], v[NCT_VRM_PIN]);
 }
 
 /* Low/high stay stored, but sensors only sees them while the live value is valid. */

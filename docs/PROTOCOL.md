@@ -38,7 +38,7 @@ What we use on MS-7D89:
 | POUT `0x96`, TEMP `0x8D` | LINEAR11 via `nct_vrm_linear11_milli` / `linear11_milli` (integer millisi on this board). |
 | IOUT `0x8C` | Always `READ_IOUT`, Direct **0.1 A/LSB**, via `nct_vrm_decode_iout_ma` / `decode_iout_ma` (`raw * 100` → mA). |
 | IIN `0x89` | `READ_IIN`, Direct **0.01 A/LSB**, via `nct_vrm_decode_iin_ma` / `decode_iin_ma` (`raw * 10` → mA). |
-| PIN `0x97` | `READ_PIN`, Direct **1 W/LSB**, via `nct_vrm_decode_pin_uw` / `decode_pin_uw` (`raw * 1000000` → µW). |
+| PIN `0x97` | `READ_PIN`, Direct **1 W/LSB**, two's complement, via `nct_vrm_decode_pin_uw` / `decode_pin_uw` (`nct_vrm_i16(raw) * 1000000` → µW). `0xFFFF` is −1 W. A negative IOUT, IIN, POUT, or PIN is not published (last non-negative value kept) and is noted with `pr_warn_ratelimited`. Efficiency skips that sample. |
 
 Sample order is TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. PAGE temperature is `0x8D`. `READ_TEMPERATURE_2` (`0x8E`, controller die) is one extra word per demand session, global, not per PAGE. `READ_TEMPERATURE_3` (`0x8F`) is not sampled. The words are separate commands and are not one snapshot. Efficiency is `nct_vrm_efficiency_pcm` / `efficiency_pcm`: `POUT/PIN` as milli-percent, 100% when output power is at least input power, and 0 when either power is not positive. That cap is 100% when output is at least input, not a second read. `nct_vrm_efficiency_pwm` / `efficiency_pwm` maps that to a count for read-only `pwm9`. libsensors 3.6.2 `get_type_scaling` returns `int`, so its 2.55 pwm factor is 2 and `sensors` prints count/2. 100% is 200. `pwm10` is not used: that build copies only four characters of a pwm filename, so `pwm10` would alias fan `pwm1`.
 

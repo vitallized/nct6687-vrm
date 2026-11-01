@@ -40,10 +40,12 @@ def _rail(c_decode_bin: Path, *samples: tuple[int, int, int, int, int]) -> dict:
         name, *vals = line.split()
         if name == "valid":
             got["valid"] = vals == ["1"]
+        elif name == "noted":
+            got["noted"] = int(vals[0])
         else:
             val, ready, mn, mx = (int(v) for v in vals)
             got[name] = (val, bool(ready), mn, mx)
-    assert set(got) == {"valid", *METRICS}
+    assert set(got) == {"valid", "noted", *METRICS}
     return got
 
 
@@ -81,6 +83,72 @@ def test_store_is_latest_sample_and_hist_spans_all(c_decode_bin: Path) -> None:
     assert r["pin"] == (100000000, True, 90000000, 120000000)
 
 
+def test_eff_smooth_converges_and_caps_and_resets(c_decode_bin: Path) -> None:
+    mid_p, mid_i, late_p, late_i = (
+        int(x)
+        for x in subprocess.check_output(
+            [str(c_decode_bin), "eff_converge"], text=True
+        ).split()
+    )
+    # 100 ms steps toward 1 W / 2 W. At 10 s the blend is most of the way there.
+    assert 500_000 < mid_p < 750_000
+    assert 1_000_000 < mid_i < 1_500_000
+    assert late_p > 950_000
+    assert late_i > 1_900_000
+
+    def published(pout: str, pin: str) -> str:
+        return subprocess.check_output(
+            [str(c_decode_bin), "eff_publish", pout, pin], text=True
+        ).strip()
+
+    assert published("50000000", "100000000") == "100"
+    assert published("100000000", "100000000") == "200"
+    assert published("120000000", "100000000") == "200"
+
+
+def test_eff_ignores_a_lone_spike_and_follows_a_real_step(c_decode_bin: Path) -> None:
+    lines = subprocess.check_output(
+        [str(c_decode_bin), "eff_spike"], text=True
+    ).splitlines()
+    # Default 100x lets 190 W beside 30 W through. 2.5x would reject it.
+    assert lines[0] == "1"
+    assert lines[1] == "0"
+    # 30 W / 36 W is 83%. Skipping that spike leaves it there.
+    assert abs(int(lines[2]) - 83) <= 2
+    step_pct, step_pout, step_pin = (int(x) for x in lines[3].split())
+    assert step_pct == 100
+    assert step_pout > 120_000_000
+    assert step_pin > 120_000_000
+
+    reset = subprocess.check_output(
+        [str(c_decode_bin), "eff_reset"], text=True
+    ).splitlines()
+    assert reset == ["1000 2000", "nodata"]
+
+    held = subprocess.check_output(
+        [str(c_decode_bin), "eff_hold"], text=True
+    ).splitlines()
+    # 30 W / 36 W stays 83% when the next PIN is negative. A negative first pair is nodata.
+    assert held == ["83 30000000 36000000", "nodata"]
+
+
+def test_cpu_full_is_one_line_in_rail_order(c_decode_bin: Path) -> None:
+    out = subprocess.check_output(
+        [
+            str(c_decode_bin),
+            "cpu_full",
+            "1255",
+            "12120",
+            "20500",
+            "2850",
+            "36000000",
+            "32000000",
+        ],
+        text=True,
+    )
+    assert out == "1255 12120 20500 2850 36000000 32000000\n"
+
+
 def test_signed_current_words_are_small_negatives(c_decode_bin: Path) -> None:
     # 0xFFF6 is -10 counts → -1.0 A. 0xFFDE is -34 counts → -0.34 A.
     iout = subprocess.check_output(
@@ -93,26 +161,43 @@ def test_signed_current_words_are_small_negatives(c_decode_bin: Path) -> None:
     assert iin == "-340"
 
 
+def test_pin_all_ones_does_not_stick_as_65kw_high(c_decode_bin: Path) -> None:
+    # 0xFFFF is -1 W. Unsigned it is 65535 W, which sensors prints as 65.53 kW.
+    pin = subprocess.check_output(
+        [str(c_decode_bin), "decode_pin_uw", "0xFFFF"], text=True
+    ).strip()
+    assert pin == "-1000000"
+    r = _rail(
+        c_decode_bin,
+        (1260, 12130, 22900, 32000000, 43000, 1830, 33000000),
+        (1260, 12130, 22900, 32000000, 43000, 1830, int(pin)),
+    )
+    assert r["noted"] == 1
+    assert r["pin"] == (33000000, True, 33000000, 33000000)
+
+
 def test_negative_iout_pout_spike_does_not_become_hist_min(c_decode_bin: Path) -> None:
     r = _rail(
         c_decode_bin,
         (1234, 12000, 17614, 22000000, 40000, 5610, 101000000),
         (1234, 12000, -13900, -17000000, 40000, -10, -1000000),
     )
-    # Input still shows the spike; only the hist rejects it.
-    assert r["iout"] == (-13900, True, 17614, 17614)
-    assert r["pout"] == (-17000000, True, 22000000, 22000000)
-    assert r["iin"] == (-10, True, 5610, 5610)
-    assert r["pin"] == (-1000000, True, 101000000, 101000000)
+    # Live stays on the last non-negative sample. Hist does not move.
+    assert r["noted"] == 4
+    assert r["iout"] == (17614, True, 17614, 17614)
+    assert r["pout"] == (22000000, True, 22000000, 22000000)
+    assert r["iin"] == (5610, True, 5610, 5610)
+    assert r["pin"] == (101000000, True, 101000000, 101000000)
 
 
 def test_first_negative_iout_pout_does_not_seed_their_hist(c_decode_bin: Path) -> None:
     r = _rail(c_decode_bin, (1234, 12000, -13900, -17000000, 40000, -10, -1000000))
     assert r["valid"] is True
-    assert r["iout"][:2] == (-13900, False)
-    assert r["pout"][:2] == (-17000000, False)
-    assert r["iin"][:2] == (-10, False)
-    assert r["pin"][:2] == (-1000000, False)
+    assert r["noted"] == 4
+    assert r["iout"][:2] == (0, False)
+    assert r["pout"][:2] == (0, False)
+    assert r["iin"][:2] == (0, False)
+    assert r["pin"][:2] == (0, False)
     # VOUT/VIN/TEMP share one seed and are ready after the same sample.
     assert r["vout"] == (1234, True, 1234, 1234)
     assert r["vin"] == (12000, True, 12000, 12000)
