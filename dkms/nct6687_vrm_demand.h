@@ -1,8 +1,8 @@
 /* VRM demand session: one PAGE attempt, or a skip.
  *
  * Caller does not hold EC_io_lock. The session takes it only when a sample
- * is due. vrm_last_read is stamped by the touch path after return, so the
- * gap seen here is the previous demand, never a synthetic HZ.
+ * is due. A demand stamps vrm_last_read here, after the gap is captured, so
+ * the gap is the previous demand, never a synthetic HZ.
  *
  * The eSIO save/arm/enable/body/disable/restore window is nct_vrm_mux_cycle.
  * Due-check, the EC lock, fail_count, the GT page, rail_apply, and recover
@@ -27,6 +27,7 @@ static unsigned long nct_vrm_eff_now_ms(void);
 static void nct_vrm_ec_lock(struct nct6687_data* data);
 static void nct_vrm_ec_unlock(struct nct6687_data* data);
 static void nct_vrm_warn_recover(void);
+static bool nct_vrm_claim_demand(struct nct6687_data* data);
 
 /* First fail stays ~HZ/4; then HZ, 2*HZ, cap 8*HZ. fails==0 uses the
  * first-fail slot so a cold invalid cache still retries at HZ/4.
@@ -172,15 +173,16 @@ static void nct_vrm_demand_session(struct nct6687_data* data, unsigned long hz,
 	if (!data->vrm_enabled)
 		return;
 
-	demanded = data->vrm_demand;
-	data->vrm_demand = false;
+	demanded = nct_vrm_claim_demand(data);
 
 	now = nct_vrm_now();
 	last_read_set = data->vrm_last_read != 0;
 	gap = last_read_set ? now - data->vrm_last_read : 0;
 	age = data->vrm_last_updated ? now - data->vrm_last_updated : ~0UL;
-	if (demanded)
+	if (demanded) {
 		data->vrm_read_gap = gap;
+		data->vrm_last_read = now;
+	}
 
 	if (!nct_vrm_should_sample(cpu->valid, demanded, last_read_set, gap, age,
 			hz, floor, data->vrm_fail_count))

@@ -86,24 +86,26 @@ def _demand(
     return got
 
 
-def test_vrm_sysfs_poll_samples_mos_thermistor() -> None:
+def test_vrm_sysfs_read_returns_the_cached_sample() -> None:
     text = (Path(__file__).resolve().parents[1] / "dkms" / "nct6687_vrm.inc.c").read_text()
-    enter = text.split("static void nct_vrm_session_enter", 1)[1].split("\n}", 1)[0]
-    locked = text.split("static int nct_vrm_locked", 1)[1].split("\n}", 1)[0]
-    sample = text.split("static void nct_vrm_sample_mos", 1)[1].split("\n}", 1)[0]
-    cpu = text.split("static ssize_t vrm_cpu_show", 1)[1].split("\n}", 1)[0]
+    enter = text.split("static void nct_vrm_session_enter", 1)[1].split("\nstatic ", 1)[0]
+    show = text.split("static ssize_t nct_vrm_show", 1)[1].split("\nstatic ", 1)[0]
+    cpu = text.split("static ssize_t vrm_cpu_show", 1)[1].split("\nstatic ", 1)[0]
+    sample = text.split("static void nct_vrm_sample_mos", 1)[1].split("\nstatic ", 1)[0]
+    assert "nct_vrm_session_enter" not in show
+    assert "nct_vrm_session_enter" not in cpu
+    assert "nct_vrm_snap_read" in show
+    assert "nct_vrm_snap_read" in cpu
+    assert "nct_vrm_kick(data, true)" in show
+    assert "nct_vrm_kick(data, true)" in cpu
     assert "vrm_demand = true" in enter
     assert "nct_vrm_session_lock" in enter
     assert "nct_vrm_sample_mos" in enter
-    assert "nct_vrm_session_enter" in locked
-    assert "memcpy" in locked
-    assert "nct_vrm_session_enter" in cpu
-    assert "nct_vrm_session_leave" in cpu
-    assert "cpu->val" not in cpu
-    assert "nct6687_read_pair" in sample
-    assert "nct_vrm_note_mos" in sample
+    assert "want_demand" in enter
     assert "time_after" in enter
     assert "last_updated" in enter
+    assert "nct6687_read_pair" in sample
+    assert "nct_vrm_note_mos" in sample
 
 
 def test_first_demand_after_idle_samples_when_cache_older_than_20ms(

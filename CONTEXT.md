@@ -37,7 +37,7 @@ Per-device min/max of PAGE samples, plus the stock VRM MOS thermistor (`temp3`).
 _Avoid_: hwmon chip min
 
 **VRM demand**:
-A VRM sysfs read (not a fan/temp attr). First demand after idle, or first-ever, uses the 20 ms floor. Background (fan/temp hook) stays 1 Hz. Consecutive PAGE failures back off (HZ/4 → 8 Hz).
+A VRM sysfs read (not a fan/temp attr) returns the cached PAGE sample and kicks a refresh. It does not wait on the eSIO mailbox. First demand after idle, or first-ever, uses the 20 ms floor. Background (fan/temp hook) stays 1 Hz and uses that same refresh. Consecutive PAGE failures back off (HZ/4 → 8 Hz).
 _Avoid_: 1 Hz as the HUD rate
 
 **upgrade persist**:

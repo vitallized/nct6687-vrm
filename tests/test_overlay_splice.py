@@ -72,6 +72,7 @@ def test_update_vrm_runs_after_update_lock_drop(spliced: str) -> None:
 
 def test_probe_registers_vrm_group(spliced: str) -> None:
     assert "nct_vrm_data_reset(data, vrm);" in spliced
+    assert "nct_vrm_arm(data, dev);" in spliced
     assert "data->extra_groups[eg++] = &nct6687_vrm_group;" in spliced
     assert "data->extra_groups[0] = &nct6687_fan_watchdog_group;" not in spliced
 

@@ -2,11 +2,13 @@
  * Relies on stock types/macros (struct nct6687_data, EC_SPACE_*, SENSOR_DEVICE_ATTR).
  */
 #include <linux/hwmon-sysfs.h>
+#include <linux/workqueue.h>
 
 /* NCT6687_VRM_PMBUS_INJECT — eSIO PMBus VRM (MSI MS-7D89 / addr 0xC0) */
 /*
- * Default OFF. update_vrm runs AFTER update_lock is released (adaptive cache:
- * 1 Hz background; match VRM sysfs poll rate down to ~20 ms when demanded)
+ * Default OFF. A VRM sysfs read copies the cached PAGE sample and kicks a
+ * refresh. The read does not wait on the eSIO mailbox. The refresh follows
+ * the inter-read gap down to ~20 ms (1 Hz when only the fan/temp hook asked)
  * and holds only EC_io_lock — same lock as nct6687_read/write.
  * r257 dropped that mutex; the splice puts it back around those helpers.
  */
@@ -53,6 +55,11 @@ static void nct_vrm_warn_recover(void)
     pr_warn_ratelimited("VRM recover failed\n");
 }
 
+static bool nct_vrm_claim_demand(struct nct6687_data* data)
+{
+    return xchg(&data->vrm_demand, false);
+}
+
 static void nct_vrm_note_negative(int metric, long val)
 {
     const char* what = "reading";
@@ -81,10 +88,91 @@ static void nct_vrm_note_negative(int metric, long val)
 
 #include "nct6687_vrm_demand.h"
 
-/* One session at a time. The demand flag is set and consumed under this lock
- * so a second reader cannot clear it before the first has sampled.
+/* One refresh at a time. Sysfs does not take this lock: it copies the snap.
+ * The demand flag itself is claimed with xchg, so a kick during the sample
+ * is not lost.
  */
 static DEFINE_MUTEX(nct_vrm_session_lock);
+
+/* What a sysfs read is allowed to see. Published once, at the end of a
+ * refresh, so a reader never waits on the mailbox and never tears a rail.
+ */
+struct nct_vrm_snap {
+    struct nct_vrm_rail rail[2];
+    bool ctrl_valid;
+    bool ctrl_hist_init;
+    long ctrl_mc;
+    long ctrl_min;
+    long ctrl_max;
+    bool eff_init;
+    long eff_pout_uw;
+    long eff_pin_uw;
+    bool mos_hist_init;
+    long mos_min;
+    long mos_max;
+};
+
+static struct nct_vrm_snap nct_vrm_snap;
+static DEFINE_SPINLOCK(nct_vrm_snap_lock);
+static struct nct6687_data* nct_vrm_work_data;
+static void nct_vrm_demand_work_fn(struct work_struct* work);
+static DECLARE_WORK(nct_vrm_demand_work, nct_vrm_demand_work_fn);
+
+static void nct_vrm_publish_snap(struct nct6687_data* data)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&nct_vrm_snap_lock, flags);
+    memcpy(nct_vrm_snap.rail, data->vrm_rail, sizeof(nct_vrm_snap.rail));
+    nct_vrm_snap.ctrl_valid = data->vrm_ctrl_valid;
+    nct_vrm_snap.ctrl_hist_init = data->vrm_ctrl_hist_init;
+    nct_vrm_snap.ctrl_mc = data->vrm_ctrl_mc;
+    nct_vrm_snap.ctrl_min = data->vrm_ctrl_min;
+    nct_vrm_snap.ctrl_max = data->vrm_ctrl_max;
+    nct_vrm_snap.eff_init = data->vrm_eff_init;
+    nct_vrm_snap.eff_pout_uw = data->vrm_eff_pout_uw;
+    nct_vrm_snap.eff_pin_uw = data->vrm_eff_pin_uw;
+    nct_vrm_snap.mos_hist_init = data->vrm_mos_hist_init;
+    nct_vrm_snap.mos_min = data->vrm_mos_min;
+    nct_vrm_snap.mos_max = data->vrm_mos_max;
+    spin_unlock_irqrestore(&nct_vrm_snap_lock, flags);
+}
+
+static void nct_vrm_snap_read(struct nct_vrm_snap* out)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&nct_vrm_snap_lock, flags);
+    *out = nct_vrm_snap;
+    spin_unlock_irqrestore(&nct_vrm_snap_lock, flags);
+}
+
+static void nct_vrm_disarm(void* ignored)
+{
+    (void)ignored;
+    cancel_work_sync(&nct_vrm_demand_work);
+    WRITE_ONCE(nct_vrm_work_data, NULL);
+}
+
+static void nct_vrm_arm(struct nct6687_data* data, struct device* dev)
+{
+    int rc;
+
+    WRITE_ONCE(nct_vrm_work_data, data);
+    rc = devm_add_action_or_reset(dev, nct_vrm_disarm, NULL);
+    if (rc)
+        pr_warn("VRM refresh hook failed (%d)\n", rc);
+}
+
+/* demand: this read wants the 20 ms floor, not the 1 Hz background rate. */
+static void nct_vrm_kick(struct nct6687_data* data, bool demand)
+{
+    if (!READ_ONCE(nct_vrm_work_data))
+        return;
+    if (demand)
+        WRITE_ONCE(data->vrm_demand, true);
+    schedule_work(&nct_vrm_demand_work);
+}
 
 static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
 {
@@ -116,6 +204,7 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_ctrl_mc = 0;
     data->vrm_ctrl_min = 0;
     data->vrm_ctrl_max = 0;
+    nct_vrm_publish_snap(data);
 }
 
 /* nct6687_temp_label[2] is "VRM MOS" → hwmon temp3. r257 stores only the
@@ -162,22 +251,26 @@ static void nct_vrm_sample_mos(struct nct6687_data* data)
     nct_vrm_note_mos(data);
 }
 
-/* Caller holds nct_vrm_session_lock until nct_vrm_session_leave. */
+/* Caller holds nct_vrm_session_lock until nct_vrm_session_leave.
+ * A kick may already have set vrm_demand. That still samples the thermistor.
+ */
 static void nct_vrm_session_enter(struct nct6687_data* data, bool demand)
 {
     unsigned long floor;
+    bool want_demand;
 
     mutex_lock(&nct_vrm_session_lock);
+    want_demand = demand || READ_ONCE(data->vrm_demand);
     if (demand)
         data->vrm_demand = true;
-    else if (!time_after(jiffies, data->last_updated)) {
+    else if (!want_demand && !time_after(jiffies, data->last_updated)) {
         /* Cache hits also call update_vrm. Only a scan that just stored
          * temperature[] should hold off the VRM thermistor read.
          */
         nct_vrm_note_mos(data);
         data->vrm_mos_read_at = jiffies;
     }
-    if (demand)
+    if (want_demand)
         nct_vrm_sample_mos(data);
     floor = msecs_to_jiffies(20);
     if (!floor)
@@ -188,8 +281,8 @@ static void nct_vrm_session_enter(struct nct6687_data* data, bool demand)
 
 static void nct_vrm_session_leave(struct nct6687_data* data, bool demand)
 {
-    if (demand)
-        data->vrm_last_read = jiffies;
+    (void)demand;
+    nct_vrm_publish_snap(data);
     mutex_unlock(&nct_vrm_session_lock);
 }
 
@@ -209,13 +302,28 @@ static int nct_vrm_locked(struct nct6687_data* data, bool demand, long* page0)
     return rc;
 }
 
+static void nct_vrm_demand_work_fn(struct work_struct* work)
+{
+    struct nct6687_data* data = READ_ONCE(nct_vrm_work_data);
+
+    (void)work;
+    if (!data || !READ_ONCE(data->vrm_enabled))
+        return;
+    /* false: a sysfs kick already set vrm_demand. A fan hook did not.
+     * claim_demand inside the session tells those apart.
+     */
+    nct_vrm_locked(data, false, NULL);
+}
+
 static void nct6687_update_vrm(struct nct6687_data* data)
 {
     if (!data->vrm_enabled)
         return;
 
-    /* Background hook. Demand flag stays clear, so the session keeps 1 Hz. */
-    nct_vrm_locked(data, false, NULL);
+    /* Background hook. Demand flag stays clear, so the session keeps 1 Hz.
+     * Do not sample here: a fan read must not block on the mailbox.
+     */
+    nct_vrm_kick(data, false);
 }
 
 static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, char* buf)
@@ -224,40 +332,41 @@ static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, c
     long vout, iout, pout;
     int ok = 0;
 
+    struct nct_vrm_snap snap;
+
     (void)attr;
-    /* VRM sysfs must not go through nct6687_update_device: that refreshes
-     * every fan/temp/volt channel under update_lock. Copy VOUT/IOUT/POUT
-     * before the session lock drops so a second reader cannot tear them.
+    /* Cached PAGE sample. The refresh runs in a workqueue. Do not call
+     * nct6687_update_device: that walks every fan, temp, and volt.
      */
     if (!data->vrm_enabled)
         return -ENODATA;
-    nct_vrm_session_enter(data, true);
-    if (data->vrm_rail[0].valid) {
-        vout = data->vrm_rail[0].val[NCT_VRM_VOUT];
-        iout = data->vrm_rail[0].val[NCT_VRM_IOUT];
-        pout = data->vrm_rail[0].val[NCT_VRM_POUT];
+    nct_vrm_snap_read(&snap);
+    nct_vrm_kick(data, true);
+    if (snap.rail[0].valid) {
+        vout = snap.rail[0].val[NCT_VRM_VOUT];
+        iout = snap.rail[0].val[NCT_VRM_IOUT];
+        pout = snap.rail[0].val[NCT_VRM_POUT];
         ok = 1;
     }
-    nct_vrm_session_leave(data, true);
     if (!ok)
         return -ENODATA;
     return sprintf(buf, "%ld %ld %ld\n", vout, iout, pout);
 }
 
-/* VOUT VIN IOUT IIN POUT PIN from the CPU rail, copied before the lock drops. */
+/* VOUT VIN IOUT IIN POUT PIN from the cached CPU rail. */
 static ssize_t vrm_cpu_full_show(struct device* dev, struct device_attribute* attr, char* buf)
 {
     struct nct6687_data* data = dev_get_drvdata(dev);
-    long page0[NCT_VRM_NMETRIC];
-    int rc;
+    struct nct_vrm_snap snap;
 
     (void)attr;
     if (!data->vrm_enabled)
         return -ENODATA;
-    rc = nct_vrm_locked(data, true, page0);
-    if (rc)
-        return rc;
-    return nct_vrm_format_cpu_full(buf, page0);
+    nct_vrm_snap_read(&snap);
+    nct_vrm_kick(data, true);
+    if (!snap.rail[0].valid)
+        return -ENODATA;
+    return nct_vrm_format_cpu_full(buf, snap.rail[0].val);
 }
 
 /*
@@ -320,6 +429,7 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
     const struct nct_vrm_chan* ch;
     const struct nct_vrm_rail* r;
     struct nct6687_data* data;
+    struct nct_vrm_snap snap;
     long val = 0;
     int rc = 0;
 
@@ -338,18 +448,18 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
      * and prints "%", so 100% is 200. pwm1–pwm8 are the fan duties.
      * libsensors 3.6.2 keeps 4 chars of a pwm name, so pwm10 would alias
      * pwm1. No GT efficiency channel.
-     * The value is copied before the session lock drops. eff_publish reads
-     * two smoothed powers; a rail read is one slot of a memcpy.
+     * The snap is one publish. eff_publish reads two smoothed powers.
      */
-    nct_vrm_session_enter(data, true);
+    nct_vrm_snap_read(&snap);
+    nct_vrm_kick(data, true);
     if (ch->metric == NCT_VRM_EFF) {
         if (sattr->index != NCT_VRM_INPUT)
             rc = -EINVAL;
-        else if (!nct_vrm_eff_publish(data->vrm_eff_init, data->vrm_eff_pout_uw,
-                data->vrm_eff_pin_uw, &val))
+        else if (!nct_vrm_eff_publish(snap.eff_init, snap.eff_pout_uw,
+                snap.eff_pin_uw, &val))
             rc = -ENODATA;
     } else {
-        r = &data->vrm_rail[ch->page];
+        r = &snap.rail[ch->page];
         switch (sattr->index) {
         case NCT_VRM_INPUT:
             if (!r->valid)
@@ -374,7 +484,6 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
             break;
         }
     }
-    nct_vrm_session_leave(data, true);
     if (rc)
         return rc;
     return sprintf(buf, "%ld\n", val);
@@ -425,6 +534,7 @@ static ssize_t nct_vrm_ctrl_show(struct device* dev, struct device_attribute* at
 {
     struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
     struct nct6687_data* data;
+    struct nct_vrm_snap snap;
     long val = 0;
     int rc = 0;
 
@@ -434,26 +544,26 @@ static ssize_t nct_vrm_ctrl_show(struct device* dev, struct device_attribute* at
     data = dev_get_drvdata(dev);
     if (!data->vrm_enabled)
         return -ENODATA;
-    nct_vrm_session_enter(data, true);
+    nct_vrm_snap_read(&snap);
+    nct_vrm_kick(data, true);
     switch (sattr->index) {
     case NCT_VRM_INPUT:
-        if (!data->vrm_ctrl_valid)
+        if (!snap.ctrl_valid)
             rc = -ENODATA;
         else
-            val = data->vrm_ctrl_mc;
+            val = snap.ctrl_mc;
         break;
     case NCT_VRM_MIN:
     case NCT_VRM_MAX:
-        if (!nct_vrm_publish_hist(data->vrm_ctrl_valid, data->vrm_ctrl_hist_init))
+        if (!nct_vrm_publish_hist(snap.ctrl_valid, snap.ctrl_hist_init))
             rc = -ENODATA;
         else
-            val = sattr->index == NCT_VRM_MAX ? data->vrm_ctrl_max : data->vrm_ctrl_min;
+            val = sattr->index == NCT_VRM_MAX ? snap.ctrl_max : snap.ctrl_min;
         break;
     default:
         rc = -EINVAL;
         break;
     }
-    nct_vrm_session_leave(data, true);
     if (rc)
         return rc;
     return sprintf(buf, "%ld\n", val);
@@ -501,16 +611,17 @@ static struct nct6687_data* nct6687_update_device(struct device* dev);
 static ssize_t nct_vrm_mos_show(struct device* dev, struct device_attribute* attr, char* buf)
 {
     struct sensor_device_attribute_2* sattr = to_sensor_dev_attr_2(attr);
-    struct nct6687_data* data = nct6687_update_device(dev);
+    struct nct_vrm_snap snap;
     long val = 0;
     int ok;
 
-    mutex_lock(&nct_vrm_session_lock);
-    ok = nct_vrm_mos_ready(data->vrm_mos_hist_init);
+    /* Stock scan, then the cached thermistor hist. Not a VRM demand. */
+    nct6687_update_device(dev);
+    nct_vrm_snap_read(&snap);
+    ok = nct_vrm_mos_ready(snap.mos_hist_init);
     if (ok)
-        val = nct_vrm_mos_value(data->vrm_mos_min, data->vrm_mos_max,
+        val = nct_vrm_mos_value(snap.mos_min, snap.mos_max,
             sattr->index == NCT_VRM_MAX);
-    mutex_unlock(&nct_vrm_session_lock);
     if (!ok)
         return -ENODATA;
     return sprintf(buf, "%ld\n", val);

@@ -131,17 +131,32 @@ static int nct_vrm_prep_clear(struct nct6687_data* data)
 	return nct_vrm_esio_write(data, 0x60, ctrl & ~(NCT_VRM_SMB_START | NCT_VRM_SMB_CLEAR));
 }
 
+/* Traced 2026-11-02: usleep_range(500, 1000) slept ~1 ms, and the last
+ * sleep of each mailbox was after START had already cleared (~7 ms of
+ * overshoot across one PAGE sample). The EC still holds START for several
+ * ms per word. Poll in tens of µs. 2000 * 50 µs keeps the stuck-START
+ * budget at 100 ms, same as the old 100 * 1 ms loop.
+ */
+#define NCT_VRM_POLL_MIN_US 20
+#define NCT_VRM_POLL_MAX_US 50
+#define NCT_VRM_POLL_TRIES 2000
+
+/* Gap after EN, before START. The old 500–1000 µs sleep ran with the bus
+ * idle (~8 ms across one PAGE sample). outb_p already posts the write.
+ */
+#define NCT_VRM_ARM_UDELAY 20
+
 static int nct_vrm_wait_start_clear(struct nct6687_data* data)
 {
 	int i;
 	u8 ctrl;
 
-	for (i = 0; i < 100; i++) {
+	for (i = 0; i < NCT_VRM_POLL_TRIES; i++) {
 		if (nct_vrm_esio_read(data, 4, 0x60, &ctrl))
 			return -EIO;
 		if (!(ctrl & NCT_VRM_SMB_START))
 			return 0;
-		nct_vrm_usleep_range(500, 1000);
+		nct_vrm_usleep_range(NCT_VRM_POLL_MIN_US, NCT_VRM_POLL_MAX_US);
 	}
 	return -ETIMEDOUT;
 }
@@ -164,7 +179,7 @@ static int nct_vrm_write_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8 val
 		|| nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
 		|| nct_vrm_esio_write(data, 0x70, value) || nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
 		return -EIO;
-	nct_vrm_usleep_range(500, 1000);
+	nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
 	if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
 		return -EIO;
 	if (nct_vrm_wait_start_clear(data))
@@ -182,7 +197,7 @@ static int nct_vrm_read_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8* out
 		|| nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
 		|| nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
 		return -EIO;
-	nct_vrm_usleep_range(500, 1000);
+	nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
 	if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
 		return -EIO;
 	if (nct_vrm_wait_start_clear(data))
@@ -203,7 +218,7 @@ static int nct_vrm_read_word(struct nct6687_data* data, u8 addr, u8 cmd, u16* ou
 		|| nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
 		|| nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
 		return -EIO;
-	nct_vrm_usleep_range(500, 1000);
+	nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
 	if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
 		return -EIO;
 	if (nct_vrm_wait_start_clear(data))

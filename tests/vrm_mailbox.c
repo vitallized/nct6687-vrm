@@ -44,6 +44,14 @@ static void nct_vrm_warn_recover(void)
 {
 }
 
+static bool nct_vrm_claim_demand(struct nct6687_data* data)
+{
+	bool demanded = data->vrm_demand;
+
+	data->vrm_demand = false;
+	return demanded;
+}
+
 static void nct_vrm_note_negative(int metric, long val)
 {
 	(void)metric;

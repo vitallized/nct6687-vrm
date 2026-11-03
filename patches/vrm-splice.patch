@@ -175,13 +175,14 @@
  	mutex_init(&data->fan_watchdog_lock);
  	INIT_DELAYED_WORK(&data->fan_watchdog_work, nct6687_fan_watchdog_work);
  	platform_set_drvdata(pdev, data);
-@@ -1721,8 +1776,22 @@
+@@ -1721,8 +1776,23 @@
  	nct6687_setup_temperatures(data);
  	nct6687_setup_voltages(data);
  
 -	if (nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)
 -		data->extra_groups[0] = &nct6687_fan_watchdog_group;
 +	nct_vrm_data_reset(data, vrm);
++	nct_vrm_arm(data, dev);
 +	if (data->vrm_enabled)
 +		dev_info(dev, "VRM PMBus eSIO sensors enabled (addr=0x%02x vout_exp=%d gt=%d)\n",
 +			 vrm_addr & 0xff, vrm_vout_exp, vrm_gt ? 1 : 0);
