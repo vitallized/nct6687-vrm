@@ -51,6 +51,7 @@ PAYLOAD: tuple[PayloadFile, ...] = (
     PayloadFile("dkms/nct6687_vrm_mailbox.h", dkms=True),
     PayloadFile("dkms/nct6687_vrm_mux.h", dkms=True),
     PayloadFile("dkms/nct6687_vrm_demand.h", dkms=True),
+    PayloadFile("dkms/nct6687_vrm_prefetch.h", dkms=True),
     PayloadFile("dkms/nct6687_vrm_hist.h", dkms=True),
     PayloadFile("patches/vrm-splice.patch"),
     PayloadFile("pacman-hook/nct6687-vrm-preupgrade.hook", etc="hook_dir"),

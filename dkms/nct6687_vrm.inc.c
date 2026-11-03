@@ -87,6 +87,7 @@ static void nct_vrm_note_negative(int metric, long val)
 }
 
 #include "nct6687_vrm_demand.h"
+#include "nct6687_vrm_prefetch.h"
 
 /* One refresh at a time. Sysfs does not take this lock: it copies the snap.
  * The demand flag itself is claimed with xchg, so a kick during the sample
@@ -110,15 +111,30 @@ struct nct_vrm_snap {
     bool mos_hist_init;
     long mos_min;
     long mos_max;
+    u64 sample_ns;
 };
 
 static struct nct_vrm_snap nct_vrm_snap;
 static DEFINE_SPINLOCK(nct_vrm_snap_lock);
+static DEFINE_SPINLOCK(nct_vrm_prefetch_lock);
+static struct nct_vrm_prefetch nct_vrm_prefetch_state;
 static struct nct6687_data* nct_vrm_work_data;
-static void nct_vrm_demand_work_fn(struct work_struct* work);
-static DECLARE_WORK(nct_vrm_demand_work, nct_vrm_demand_work_fn);
+static void nct_vrm_now_work_fn(struct work_struct* work);
+static void nct_vrm_prefetch_work_fn(struct work_struct* work);
+static void nct_vrm_sensor_work_fn(struct work_struct* work);
+/* Immediate sample and the timed prefetch are different work items so a
+ * fan tick cannot consume the prefetch or cancel its timer.
+ */
+static DECLARE_WORK(nct_vrm_now_work, nct_vrm_now_work_fn);
+static DECLARE_DELAYED_WORK(nct_vrm_prefetch_work, nct_vrm_prefetch_work_fn);
+static DECLARE_WORK(nct_vrm_sensor_work, nct_vrm_sensor_work_fn);
 
-static void nct_vrm_publish_snap(struct nct6687_data* data)
+static unsigned long nct_vrm_mono_ms(void)
+{
+    return (unsigned long)ktime_to_ms(ktime_get());
+}
+
+static void nct_vrm_publish_snap(struct nct6687_data* data, bool stamped)
 {
     unsigned long flags;
 
@@ -135,7 +151,28 @@ static void nct_vrm_publish_snap(struct nct6687_data* data)
     nct_vrm_snap.mos_hist_init = data->vrm_mos_hist_init;
     nct_vrm_snap.mos_min = data->vrm_mos_min;
     nct_vrm_snap.mos_max = data->vrm_mos_max;
+    if (stamped)
+        nct_vrm_snap.sample_ns = ktime_get_ns();
+    else if (!data->vrm_rail[0].valid)
+        nct_vrm_snap.sample_ns = 0;
     spin_unlock_irqrestore(&nct_vrm_snap_lock, flags);
+}
+
+static unsigned long nct_vrm_sample_age_ms(void)
+{
+    unsigned long flags;
+    u64 ns;
+    s64 age;
+
+    spin_lock_irqsave(&nct_vrm_snap_lock, flags);
+    ns = nct_vrm_snap.sample_ns;
+    spin_unlock_irqrestore(&nct_vrm_snap_lock, flags);
+    if (!ns)
+        return ULONG_MAX;
+    age = ktime_ms_delta(ktime_get(), ns_to_ktime(ns));
+    if (age < 0)
+        return 0;
+    return (unsigned long)age;
 }
 
 static void nct_vrm_snap_read(struct nct_vrm_snap* out)
@@ -150,7 +187,9 @@ static void nct_vrm_snap_read(struct nct_vrm_snap* out)
 static void nct_vrm_disarm(void* ignored)
 {
     (void)ignored;
-    cancel_work_sync(&nct_vrm_demand_work);
+    cancel_work_sync(&nct_vrm_now_work);
+    cancel_delayed_work_sync(&nct_vrm_prefetch_work);
+    cancel_work_sync(&nct_vrm_sensor_work);
     WRITE_ONCE(nct_vrm_work_data, NULL);
 }
 
@@ -164,14 +203,75 @@ static void nct_vrm_arm(struct nct6687_data* data, struct device* dev)
         pr_warn("VRM refresh hook failed (%d)\n", rc);
 }
 
-/* demand: this read wants the 20 ms floor, not the 1 Hz background rate. */
+/* Timer plus a highpri queue still lands late. Start this much sooner than
+ * the 40 ms margin so the sample is done before the next poll, then the
+ * early-arrival correction pulls a prompt timer back in.
+ */
+#define NCT_VRM_PREFETCH_SLACK_MS 80UL
+
+static bool nct_vrm_prefetch_busy(void)
+{
+    return delayed_work_pending(&nct_vrm_prefetch_work) ||
+        work_busy(&nct_vrm_prefetch_work.work);
+}
+
+static void nct_vrm_arm_prefetch(unsigned long delay_ms)
+{
+    unsigned long flags, lead = delay_ms;
+
+    if (lead > NCT_VRM_PREFETCH_SLACK_MS)
+        lead -= NCT_VRM_PREFETCH_SLACK_MS;
+    spin_lock_irqsave(&nct_vrm_prefetch_lock, flags);
+    nct_vrm_prefetch_state.arm_n++;
+    nct_vrm_prefetch_state.last_delay_ms = lead;
+    spin_unlock_irqrestore(&nct_vrm_prefetch_lock, flags);
+    mod_delayed_work(system_highpri_wq, &nct_vrm_prefetch_work, msecs_to_jiffies(lead));
+}
+
+static void nct_vrm_arm_now(void)
+{
+    /* Do not cancel the prefetch timer. A fallback read used to kill the
+     * sample that was about to make the next read fresh.
+     */
+    schedule_work(&nct_vrm_now_work);
+}
+
+/* demand: this read wants the 20 ms floor, not the 1 Hz background rate.
+ * A steady reader prefetches. A fan hook must not cancel that timer.
+ */
 static void nct_vrm_kick(struct nct6687_data* data, bool demand)
 {
+    struct nct_vrm_prefetch_plan plan;
+    unsigned long flags, age_ms;
+
     if (!READ_ONCE(nct_vrm_work_data))
         return;
-    if (demand)
-        WRITE_ONCE(data->vrm_demand, true);
-    schedule_work(&nct_vrm_demand_work);
+    if (!demand) {
+        /* 1 Hz background only when no prefetch is already waiting.
+         * Never the delayed work: that timer belongs to the hit path.
+         */
+        if (!nct_vrm_prefetch_busy())
+            schedule_work(&nct_vrm_now_work);
+        return;
+    }
+    WRITE_ONCE(data->vrm_demand, true);
+    age_ms = nct_vrm_sample_age_ms();
+    spin_lock_irqsave(&nct_vrm_prefetch_lock, flags);
+    plan = nct_vrm_prefetch_note(&nct_vrm_prefetch_state, nct_vrm_mono_ms(), age_ms, 20);
+    if (plan.delay_ms)
+        nct_vrm_prefetch_expect(&nct_vrm_prefetch_state);
+    spin_unlock_irqrestore(&nct_vrm_prefetch_lock, flags);
+    if (plan.act == NCT_VRM_PREFETCH_NONE)
+        return;
+    /* A fallback read used to mod_delayed_work the timer that was about
+     * to publish, which pushed it past this poll forever. Leave it.
+     */
+    if (plan.act != NCT_VRM_PREFETCH_LATER && nct_vrm_prefetch_busy())
+        return;
+    if (plan.delay_ms)
+        nct_vrm_arm_prefetch(plan.delay_ms);
+    if (plan.act != NCT_VRM_PREFETCH_LATER)
+        nct_vrm_arm_now();
 }
 
 static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
@@ -204,7 +304,12 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_ctrl_mc = 0;
     data->vrm_ctrl_min = 0;
     data->vrm_ctrl_max = 0;
-    nct_vrm_publish_snap(data);
+    nct_vrm_publish_snap(data, false);
+    nct_vrm_prefetch_state = (struct nct_vrm_prefetch){ 0 };
+    nct_vrm_busy_ns = 0;
+    nct_vrm_busy_samples = 0;
+    nct_vrm_busy_depth = 0;
+    nct_vrm_start_min_us = 0;
 }
 
 /* nct6687_temp_label[2] is "VRM MOS" → hwmon temp3. r257 stores only the
@@ -214,6 +319,10 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
 #define NCT_VRM_MOS_NR 100
 #define NCT_VRM_CTRL_NR 101
 #define NCT_VRM_FULL_NR 102
+#define NCT_VRM_AGE_NR 103
+#define NCT_VRM_AGE_AT_NR 104
+#define NCT_VRM_PREFETCH_STATE_NR 105
+#define NCT_VRM_BUSY_NS_NR 106
 
 static bool nct_vrm_mos_present(void)
 {
@@ -254,7 +363,7 @@ static void nct_vrm_sample_mos(struct nct6687_data* data)
 /* Caller holds nct_vrm_session_lock until nct_vrm_session_leave.
  * A kick may already have set vrm_demand. That still samples the thermistor.
  */
-static void nct_vrm_session_enter(struct nct6687_data* data, bool demand)
+static void nct_vrm_session_enter(struct nct6687_data* data, bool demand, bool force_floor)
 {
     unsigned long floor;
     bool want_demand;
@@ -276,47 +385,169 @@ static void nct_vrm_session_enter(struct nct6687_data* data, bool demand)
     if (!floor)
         floor = 1;
     nct_vrm_demand_session(data, HZ, floor, (u8)(vrm_addr & 0xff), vrm_vout_exp,
-        vrm_gt);
+        vrm_gt, force_floor);
 }
 
-static void nct_vrm_session_leave(struct nct6687_data* data, bool demand)
+static void nct_vrm_session_leave(struct nct6687_data* data, bool sampled)
 {
-    (void)demand;
-    nct_vrm_publish_snap(data);
+    nct_vrm_publish_snap(data, sampled);
+    if (sampled)
+        nct_vrm_busy_note_sample();
     mutex_unlock(&nct_vrm_session_lock);
 }
 
-/* page0, when non-NULL, receives the CPU rail under this lock. -ENODATA if invalid. */
-static int nct_vrm_locked(struct nct6687_data* data, bool demand, long* page0)
+/* page0, when non-NULL, receives the CPU rail under this lock. -ENODATA if invalid.
+ * sampled is true only when this call's EC sample changed vrm_last_updated.
+ */
+static int nct_vrm_locked(struct nct6687_data* data, bool demand, long* page0, bool* sampled,
+    bool force_floor)
 {
+    unsigned long before;
     int rc = 0;
 
-    nct_vrm_session_enter(data, demand);
+    before = data->vrm_last_updated;
+    nct_vrm_session_enter(data, demand, force_floor);
     if (page0) {
         if (!data->vrm_rail[0].valid)
             rc = -ENODATA;
         else
             memcpy(page0, data->vrm_rail[0].val, sizeof(data->vrm_rail[0].val));
     }
-    nct_vrm_session_leave(data, demand);
+    if (sampled)
+        *sampled = data->vrm_last_updated != before;
+    nct_vrm_session_leave(data, data->vrm_last_updated != before);
     return rc;
 }
 
-static void nct_vrm_demand_work_fn(struct work_struct* work)
+/* One sample before the hwmon device is registered, so the first read is
+ * not ENODATA. Same session as a demand refresh, including the stuck-START
+ * budget. A miss drops the fail stamp so the next read retries at once.
+ */
+static void nct_vrm_prime(struct nct6687_data* data)
+{
+    if (!data->vrm_enabled)
+        return;
+    nct_vrm_locked(data, true, NULL, NULL, false);
+    if (data->vrm_rail[0].valid)
+        return;
+    data->vrm_fail_count = 0;
+    data->vrm_gt_fails = 0;
+    data->vrm_gt_fail_at = 0;
+    data->vrm_last_updated = 0;
+    data->vrm_last_read = 0;
+    data->vrm_demand = false;
+    nct_vrm_publish_snap(data, false);
+}
+
+/* prefetch: this run was the timed one, so chain the next period even if
+ * the hit read never re-arms. now-work passes false and arms from the
+ * read's burst instead.
+ */
+static void nct_vrm_run_sample(bool prefetch)
+{
+    struct nct6687_data* data = READ_ONCE(nct_vrm_work_data);
+    unsigned long flags, seq, delay, dur;
+    bool demanded, sampled;
+    ktime_t t0;
+
+    if (!data || !READ_ONCE(data->vrm_enabled))
+        return;
+    spin_lock_irqsave(&nct_vrm_prefetch_lock, flags);
+    seq = nct_vrm_prefetch_state.burst_seq;
+    if (prefetch)
+        nct_vrm_prefetch_state.run_n++;
+    if (prefetch && nct_vrm_prefetch_idle(&nct_vrm_prefetch_state, nct_vrm_mono_ms())) {
+        nct_vrm_prefetch_state.skip_n++;
+        spin_unlock_irqrestore(&nct_vrm_prefetch_lock, flags);
+        return;
+    }
+    spin_unlock_irqrestore(&nct_vrm_prefetch_lock, flags);
+
+    /* The read that armed this timer already consumed vrm_demand.
+     * The 1 Hz background gate, and the demand gap rule, both drop a
+     * prefetch: it starts just under 1 s after the kick, and the cache
+     * is one sample younger than that gap. force_floor keeps the 20 ms
+     * floor and the fail backoff, and lets this run publish.
+     */
+    if (prefetch)
+        WRITE_ONCE(data->vrm_demand, true);
+    demanded = READ_ONCE(data->vrm_demand);
+    t0 = ktime_get();
+    nct_vrm_locked(data, prefetch, NULL, &sampled, prefetch);
+    dur = (unsigned long)ktime_ms_delta(ktime_get(), t0);
+    if (!dur)
+        dur = 1;
+
+    spin_lock_irqsave(&nct_vrm_prefetch_lock, flags);
+    if (sampled)
+        nct_vrm_prefetch_note_duration(&nct_vrm_prefetch_state, dur);
+    else if (prefetch)
+        nct_vrm_prefetch_state.skip_n++;
+    delay = 0;
+    if (sampled && prefetch)
+        delay = nct_vrm_prefetch_chain_ms(&nct_vrm_prefetch_state, dur);
+    else if (sampled && demanded && nct_vrm_prefetch_state.burst_seq == seq)
+        delay = nct_vrm_prefetch_delay_ms(&nct_vrm_prefetch_state, nct_vrm_mono_ms(), 20);
+    if (delay)
+        nct_vrm_prefetch_expect(&nct_vrm_prefetch_state);
+    spin_unlock_irqrestore(&nct_vrm_prefetch_lock, flags);
+    /* The prefetch work is running, so it is "busy"; it still has to arm
+     * the next period. A now-work must not move a timer the read already set.
+     */
+    if (delay && (prefetch || !nct_vrm_prefetch_busy()))
+        nct_vrm_arm_prefetch(delay);
+}
+
+static void nct_vrm_now_work_fn(struct work_struct* work)
+{
+    (void)work;
+    nct_vrm_run_sample(false);
+}
+
+static void nct_vrm_prefetch_work_fn(struct work_struct* work)
+{
+    (void)work;
+    nct_vrm_run_sample(true);
+}
+
+/* 1 Hz fan/temp/volt scan. Runs on a worker so a reader never takes
+ * EC_io_lock while a PAGE sample holds it. update_lock stays inside this
+ * function; the VRM sample does not take it.
+ */
+static void nct_vrm_refresh_sensors(struct nct6687_data* data)
+{
+    mutex_lock(&data->update_lock);
+    if (time_after(jiffies, data->last_updated + HZ) || !data->valid) {
+        nct6687_update_voltage(data);
+        nct6687_update_temperatures(data);
+        nct6687_update_fans(data);
+        data->last_updated = jiffies;
+        data->valid = true;
+    }
+    mutex_unlock(&data->update_lock);
+}
+
+static void nct_vrm_sensor_work_fn(struct work_struct* work)
 {
     struct nct6687_data* data = READ_ONCE(nct_vrm_work_data);
 
     (void)work;
-    if (!data || !READ_ONCE(data->vrm_enabled))
+    if (!data)
         return;
-    /* false: a sysfs kick already set vrm_demand. A fan hook did not.
-     * claim_demand inside the session tells those apart.
-     */
-    nct_vrm_locked(data, false, NULL);
+    nct_vrm_refresh_sensors(data);
+}
+
+static void nct_vrm_schedule_sensors(void)
+{
+    if (!READ_ONCE(nct_vrm_work_data))
+        return;
+    schedule_work(&nct_vrm_sensor_work);
 }
 
 static void nct6687_update_vrm(struct nct6687_data* data)
 {
+    /* Always, including vrm=0. The reader must not scan the EC itself. */
+    nct_vrm_schedule_sensors();
     if (!data->vrm_enabled)
         return;
 
@@ -489,6 +720,84 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
     return sprintf(buf, "%ld\n", val);
 }
 
+/* Live age of the published sample. Not a demand read: no kick, no cadence. */
+static ssize_t vrm_sample_age_show(struct device* dev, struct device_attribute* attr, char* buf)
+{
+    struct nct6687_data* data = dev_get_drvdata(dev);
+    unsigned long age;
+
+    (void)attr;
+    if (!data->vrm_enabled)
+        return -ENODATA;
+    age = nct_vrm_sample_age_ms();
+    if (age == ULONG_MAX)
+        return -ENODATA;
+    return sprintf(buf, "%lu\n", age);
+}
+
+/* Age the latest demand burst saw, frozen then. A debug read does not move it. */
+static ssize_t vrm_sample_age_at_read_show(struct device* dev, struct device_attribute* attr,
+    char* buf)
+{
+    unsigned long flags, age;
+    bool valid;
+    struct nct6687_data* data = dev_get_drvdata(dev);
+
+    (void)attr;
+    if (!data->vrm_enabled)
+        return -ENODATA;
+    spin_lock_irqsave(&nct_vrm_prefetch_lock, flags);
+    valid = nct_vrm_prefetch_state.age_at_read_valid;
+    age = nct_vrm_prefetch_state.age_at_read_ms;
+    spin_unlock_irqrestore(&nct_vrm_prefetch_lock, flags);
+    if (!valid)
+        return -ENODATA;
+    return sprintf(buf, "%lu\n", age);
+}
+
+/* prefetch|fallback|learning and the learned interval in ms. Not a demand read. */
+static ssize_t vrm_prefetch_state_show(struct device* dev, struct device_attribute* attr, char* buf)
+{
+    unsigned long flags, interval, dur, dly;
+    unsigned stable, arm, run, skip;
+    enum nct_vrm_prefetch_act act;
+    struct nct6687_data* data = dev_get_drvdata(dev);
+    const char* mode = "learning";
+
+    (void)attr;
+    if (!data->vrm_enabled)
+        return -ENODATA;
+    spin_lock_irqsave(&nct_vrm_prefetch_lock, flags);
+    act = nct_vrm_prefetch_state.last_act;
+    interval = nct_vrm_prefetch_state.interval_ms;
+    dur = nct_vrm_prefetch_state.duration_ms;
+    stable = nct_vrm_prefetch_state.stable;
+    arm = nct_vrm_prefetch_state.arm_n;
+    run = nct_vrm_prefetch_state.run_n;
+    skip = nct_vrm_prefetch_state.skip_n;
+    dly = nct_vrm_prefetch_state.last_delay_ms;
+    spin_unlock_irqrestore(&nct_vrm_prefetch_lock, flags);
+    if (act == NCT_VRM_PREFETCH_LATER)
+        mode = "prefetch";
+    else if (act == NCT_VRM_PREFETCH_NOW)
+        mode = "fallback";
+    return sprintf(buf, "%s %lu dur=%lu st=%u arm=%u run=%u skip=%u dly=%lu\n",
+        mode, interval, dur, stable, arm, run, skip, dly);
+}
+
+/* Cumulative busy ns, then how many refreshes that covers. Not a demand read. */
+static ssize_t vrm_busy_ns_show(struct device* dev, struct device_attribute* attr, char* buf)
+{
+    struct nct6687_data* data = dev_get_drvdata(dev);
+
+    (void)attr;
+    if (!data->vrm_enabled)
+        return -ENODATA;
+    return sprintf(buf, "%llu %llu\n",
+        (unsigned long long)READ_ONCE(nct_vrm_busy_ns),
+        (unsigned long long)READ_ONCE(nct_vrm_busy_samples));
+}
+
 #define NCT_VRM_ATTR(_name, _ch, _stat) \
     static SENSOR_DEVICE_ATTR_2(_name, 0444, nct_vrm_show, NULL, _ch, _stat)
 
@@ -496,6 +805,14 @@ static SENSOR_DEVICE_ATTR_2(vrm_cpu, 0444, vrm_cpu_show, NULL,
     NCT_VRM_CPU_VOUT, NCT_VRM_INPUT);
 static SENSOR_DEVICE_ATTR_2(vrm_cpu_full, 0444, vrm_cpu_full_show, NULL,
     NCT_VRM_FULL_NR, NCT_VRM_INPUT);
+static SENSOR_DEVICE_ATTR_2(vrm_sample_age, 0444, vrm_sample_age_show, NULL,
+    NCT_VRM_AGE_NR, NCT_VRM_INPUT);
+static SENSOR_DEVICE_ATTR_2(vrm_sample_age_at_read, 0444, vrm_sample_age_at_read_show, NULL,
+    NCT_VRM_AGE_AT_NR, NCT_VRM_INPUT);
+static SENSOR_DEVICE_ATTR_2(vrm_prefetch_state, 0444, vrm_prefetch_state_show, NULL,
+    NCT_VRM_PREFETCH_STATE_NR, NCT_VRM_INPUT);
+static SENSOR_DEVICE_ATTR_2(vrm_busy_ns, 0444, vrm_busy_ns_show, NULL,
+    NCT_VRM_BUSY_NS_NR, NCT_VRM_INPUT);
 NCT_VRM_ATTR(in20_input, NCT_VRM_CPU_VOUT, NCT_VRM_INPUT);
 NCT_VRM_ATTR(in20_label, NCT_VRM_CPU_VOUT, NCT_VRM_LABEL);
 NCT_VRM_ATTR(in20_min, NCT_VRM_CPU_VOUT, NCT_VRM_MIN);
@@ -652,6 +969,10 @@ static umode_t nct6687_vrm_attr_is_visible(struct kobject* kobj,
 static struct attribute* nct6687_vrm_attrs[] = {
     &sensor_dev_attr_vrm_cpu.dev_attr.attr,
     &sensor_dev_attr_vrm_cpu_full.dev_attr.attr,
+    &sensor_dev_attr_vrm_sample_age.dev_attr.attr,
+    &sensor_dev_attr_vrm_sample_age_at_read.dev_attr.attr,
+    &sensor_dev_attr_vrm_prefetch_state.dev_attr.attr,
+    &sensor_dev_attr_vrm_busy_ns.dev_attr.attr,
     &sensor_dev_attr_in20_input.dev_attr.attr,
     &sensor_dev_attr_in20_label.dev_attr.attr,
     &sensor_dev_attr_in20_min.dev_attr.attr,

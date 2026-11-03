@@ -232,10 +232,17 @@ void nct_vrm_host_udelay(unsigned us)
 	(void)us;
 }
 
+static unsigned nct_vrm_host_sleep_busy;
+
 void nct_vrm_host_usleep_range(unsigned min_us, unsigned max_us)
 {
 	(void)min_us;
 	(void)max_us;
+	/* The START poll must be asleep here. A non-zero depth counts the sleep
+	 * toward vrm_busy_ns.
+	 */
+	if (nct_vrm_busy_depth)
+		nct_vrm_host_sleep_busy++;
 }
 
 static void dump_log(void)
@@ -348,6 +355,7 @@ int main(int argc, char** argv)
 	unsigned long demand_gap = 0;
 	unsigned demand_fails = 0;
 	int demand_on = 0;
+	int force_floor = 0;
 	int cpu_valid = 0;
 	int sample_gt = 0;
 	int mux_recover = 0;
@@ -432,6 +440,8 @@ int main(int argc, char** argv)
 			demand_gap = strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--demand")) {
 			demand_on = 1;
+		} else if (!strcmp(argv[i], "--force-floor")) {
+			force_floor = 1;
 		} else if (!strcmp(argv[i], "--cpu-valid")) {
 			cpu_valid = 1;
 		} else if (!strcmp(argv[i], "--gt")) {
@@ -563,12 +573,14 @@ int main(int argc, char** argv)
 		data.vrm_rail[0].valid = cpu_valid;
 		pmbus_dev = 1;
 		before = nlog;
-		nct_vrm_demand_session(&data, demand_hz, demand_floor, a, -10, sample_gt);
+		nct_vrm_demand_session(&data, demand_hz, demand_floor, a, -10, sample_gt,
+			force_floor);
 		if (have_then) {
 			demand_now = then_now;
 			data.vrm_last_read = then_last_read;
 			data.vrm_demand = true;
-			nct_vrm_demand_session(&data, demand_hz, demand_floor, a, -10, sample_gt);
+			nct_vrm_demand_session(&data, demand_hz, demand_floor, a, -10, sample_gt,
+				force_floor);
 		}
 		printf("io=%d\n", nlog > before);
 		printf("fail=%u\n", data.vrm_fail_count);
@@ -581,6 +593,7 @@ int main(int argc, char** argv)
 		printf("vout=%ld\n", data.vrm_rail[0].val[NCT_VRM_VOUT]);
 		printf("ctrl_valid=%d\n", data.vrm_ctrl_valid ? 1 : 0);
 		printf("ctrl_mc=%ld\n", data.vrm_ctrl_mc);
+		printf("sleep_busy=%u\n", nct_vrm_host_sleep_busy);
 		return 0;
 	}
 	if (!strcmp(fn, "mux") && argc - i == 2) {

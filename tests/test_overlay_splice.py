@@ -66,13 +66,19 @@ def test_update_vrm_runs_after_update_lock_drop(spliced: str) -> None:
     decl = "static void nct6687_update_vrm(struct nct6687_data *data);"
     assert spliced.index(decl) < spliced.index(sig)
     body = _func(spliced, sig)
-    unlock = body.rindex("mutex_unlock(&data->update_lock);")
-    assert unlock < body.index("nct6687_update_vrm(data);") < body.index("return data;")
+    assert "nct6687_update_vrm(data);" in body
+    assert body.index("nct6687_update_vrm(data);") < body.index("return data;")
+    assert "mutex_lock" not in body
+    assert "nct6687_update_fans" not in body
 
 
 def test_probe_registers_vrm_group(spliced: str) -> None:
-    assert "nct_vrm_data_reset(data, vrm);" in spliced
-    assert "nct_vrm_arm(data, dev);" in spliced
+    probe = _func(spliced, "static int nct6687_probe(struct platform_device *pdev)")
+    assert "nct_vrm_data_reset(data, vrm);" in probe
+    assert "nct_vrm_arm(data, dev);" in probe
+    assert "nct_vrm_prime(data);" in probe
+    assert probe.index("nct6687_init_device(data);") < probe.index("nct_vrm_prime(data);")
+    assert probe.index("nct_vrm_prime(data);") < probe.index("devm_hwmon_device_register_with_info(")
     assert "data->extra_groups[eg++] = &nct6687_vrm_group;" in spliced
     assert "data->extra_groups[0] = &nct6687_fan_watchdog_group;" not in spliced
 

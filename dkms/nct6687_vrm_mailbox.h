@@ -37,6 +37,7 @@ void nct_vrm_host_outb(u16 port, u8 val);
 u8 nct_vrm_host_inb(u16 port);
 void nct_vrm_host_udelay(unsigned us);
 void nct_vrm_host_usleep_range(unsigned min_us, unsigned max_us);
+typedef uint64_t u64;
 
 static inline void nct_vrm_outb(u16 port, u8 val)
 {
@@ -45,10 +46,6 @@ static inline void nct_vrm_outb(u16 port, u8 val)
 static inline u8 nct_vrm_inb(u16 port)
 {
 	return nct_vrm_host_inb(port);
-}
-static inline void nct_vrm_udelay(unsigned us)
-{
-	nct_vrm_host_udelay(us);
 }
 static inline void nct_vrm_usleep_range(unsigned min_us, unsigned max_us)
 {
@@ -63,15 +60,67 @@ static inline u8 nct_vrm_inb(u16 port)
 {
 	return inb_p(port);
 }
-static inline void nct_vrm_udelay(unsigned us)
-{
-	udelay(us);
-}
 static inline void nct_vrm_usleep_range(unsigned min_us, unsigned max_us)
 {
 	usleep_range(min_us, max_us);
 }
 #endif
+
+/* Busy time of the refresh: port I/O, the START poll's register checks,
+ * udelay, and decode. usleep_range is a sleep and is not entered.
+ * One writer, the VRM session. vrm_busy_ns is the cumulative total;
+ * vrm_busy_samples is how many refreshes published.
+ */
+#ifndef NCT_VRM_MAILBOX_HOST
+static u64 nct_vrm_busy_ns;
+static u64 nct_vrm_busy_t0;
+#endif
+static u64 nct_vrm_busy_samples;
+static unsigned nct_vrm_busy_depth;
+
+static inline void nct_vrm_busy_enter(void)
+{
+	if (nct_vrm_busy_depth++ == 0) {
+#ifndef NCT_VRM_MAILBOX_HOST
+		nct_vrm_busy_t0 = ktime_get_ns();
+#endif
+	}
+}
+
+static inline void nct_vrm_busy_leave(void)
+{
+	if (nct_vrm_busy_depth == 0)
+		return;
+	if (--nct_vrm_busy_depth == 0) {
+#ifndef NCT_VRM_MAILBOX_HOST
+		u64 now = ktime_get_ns();
+
+		if (now > nct_vrm_busy_t0)
+			WRITE_ONCE(nct_vrm_busy_ns,
+				READ_ONCE(nct_vrm_busy_ns) + (now - nct_vrm_busy_t0));
+#endif
+	}
+}
+
+static inline void nct_vrm_busy_note_sample(void)
+{
+#ifdef NCT_VRM_MAILBOX_HOST
+	nct_vrm_busy_samples++;
+#else
+	WRITE_ONCE(nct_vrm_busy_samples, READ_ONCE(nct_vrm_busy_samples) + 1);
+#endif
+}
+
+static inline void nct_vrm_udelay(unsigned us)
+{
+	nct_vrm_busy_enter();
+#ifdef NCT_VRM_MAILBOX_HOST
+	nct_vrm_host_udelay(us);
+#else
+	udelay(us);
+#endif
+	nct_vrm_busy_leave();
+}
 
 /*
  * Caller must hold data->EC_io_lock.
@@ -95,24 +144,36 @@ static int nct_vrm_idle(struct nct6687_data* data)
 
 static int nct_vrm_esio_write(struct nct6687_data* data, u8 index, u8 value)
 {
+	int rc = 0;
+
+	nct_vrm_busy_enter();
 	if (nct_vrm_idle(data))
-		return -EBUSY;
-	nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0x04);
-	nct_vrm_outb(data->addr + EC_SPACE_INDEX_REGISTER_OFFSET, index);
-	nct_vrm_outb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET, value);
-	nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0xff);
-	return 0;
+		rc = -EBUSY;
+	else {
+		nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0x04);
+		nct_vrm_outb(data->addr + EC_SPACE_INDEX_REGISTER_OFFSET, index);
+		nct_vrm_outb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET, value);
+		nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0xff);
+	}
+	nct_vrm_busy_leave();
+	return rc;
 }
 
 static int nct_vrm_esio_read(struct nct6687_data* data, u8 page, u8 index, u8* out)
 {
+	int rc = 0;
+
+	nct_vrm_busy_enter();
 	if (nct_vrm_idle(data))
-		return -EBUSY;
-	nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, page);
-	nct_vrm_outb(data->addr + EC_SPACE_INDEX_REGISTER_OFFSET, index);
-	*out = nct_vrm_inb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
-	nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0xff);
-	return 0;
+		rc = -EBUSY;
+	else {
+		nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, page);
+		nct_vrm_outb(data->addr + EC_SPACE_INDEX_REGISTER_OFFSET, index);
+		*out = nct_vrm_inb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
+		nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0xff);
+	}
+	nct_vrm_busy_leave();
+	return rc;
 }
 
 static int nct_vrm_prep_clear(struct nct6687_data* data)
@@ -131,15 +192,33 @@ static int nct_vrm_prep_clear(struct nct6687_data* data)
 	return nct_vrm_esio_write(data, 0x60, ctrl & ~(NCT_VRM_SMB_START | NCT_VRM_SMB_CLEAR));
 }
 
-/* Traced 2026-11-02: usleep_range(500, 1000) slept ~1 ms, and the last
- * sleep of each mailbox was after START had already cleared (~7 ms of
- * overshoot across one PAGE sample). The EC still holds START for several
- * ms per word. Poll in tens of µs. 2000 * 50 µs keeps the stuck-START
- * budget at 100 ms, same as the old 100 * 1 ms loop.
+/* EC turnaround is 5–13 ms per word (trace 2026-11-02). A check is several
+ * inb_p/outb_p, ~30–40 µs, so polling from t=0 is the CPU cost: 41.4 ms/sample
+ * at 20 µs, 16.7 ms at 400 µs, against 11.8 ms when the poll was ~1 ms.
+ * The sysfs read does not wait. Sleep ~4 ms before the first check, then
+ * every ~1 ms. This kernel sleeps to the top of usleep_range. Once a word
+ * has cleared, the next first-sleep is that minimum minus 1 ms. Stuck START
+ * still gives up at 100 ms. Overshoot is at most one poll per word.
  */
-#define NCT_VRM_POLL_MIN_US 20
-#define NCT_VRM_POLL_MAX_US 50
-#define NCT_VRM_POLL_TRIES 2000
+#define NCT_VRM_START_FIRST_US 4000
+#define NCT_VRM_START_GUARD_US 1000
+#define NCT_VRM_START_MIN_SAMPLE_US 2000
+#define NCT_VRM_START_BUDGET_US 100000
+#define NCT_VRM_POLL_MIN_US 800
+#define NCT_VRM_POLL_MAX_US 1000
+#define NCT_VRM_START_TRIES 110
+
+/* 0 until a word clears. Then the fastest START-clear time, in µs. */
+static unsigned nct_vrm_start_min_us;
+
+static u64 nct_vrm_wait_now_ns(void)
+{
+#ifdef NCT_VRM_MAILBOX_HOST
+	return 0;
+#else
+	return ktime_get_ns();
+#endif
+}
 
 /* Gap after EN, before START. The old 500–1000 µs sleep ran with the bus
  * idle (~8 ms across one PAGE sample). outb_p already posts the write.
@@ -148,14 +227,33 @@ static int nct_vrm_prep_clear(struct nct6687_data* data)
 
 static int nct_vrm_wait_start_clear(struct nct6687_data* data)
 {
-	int i;
+	unsigned i, initial, elapsed_us;
 	u8 ctrl;
+	u64 t0, now;
 
-	for (i = 0; i < NCT_VRM_POLL_TRIES; i++) {
+	initial = NCT_VRM_START_FIRST_US;
+	if (nct_vrm_start_min_us > NCT_VRM_START_GUARD_US)
+		initial = nct_vrm_start_min_us - NCT_VRM_START_GUARD_US;
+	if (initial < NCT_VRM_START_GUARD_US)
+		initial = NCT_VRM_START_GUARD_US;
+	if (initial > 8000)
+		initial = 8000;
+
+	t0 = nct_vrm_wait_now_ns();
+	nct_vrm_usleep_range(initial - 200, initial);
+	for (i = 0; i < NCT_VRM_START_TRIES; i++) {
 		if (nct_vrm_esio_read(data, 4, 0x60, &ctrl))
 			return -EIO;
-		if (!(ctrl & NCT_VRM_SMB_START))
+		now = nct_vrm_wait_now_ns();
+		elapsed_us = (t0 && now > t0) ? (unsigned)((now - t0) / 1000ULL) : 0;
+		if (!(ctrl & NCT_VRM_SMB_START)) {
+			if (elapsed_us >= NCT_VRM_START_MIN_SAMPLE_US &&
+				(!nct_vrm_start_min_us || elapsed_us < nct_vrm_start_min_us))
+				nct_vrm_start_min_us = elapsed_us;
 			return 0;
+		}
+		if (elapsed_us >= NCT_VRM_START_BUDGET_US)
+			return -ETIMEDOUT;
 		nct_vrm_usleep_range(NCT_VRM_POLL_MIN_US, NCT_VRM_POLL_MAX_US);
 	}
 	return -ETIMEDOUT;
@@ -289,6 +387,7 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
 		return -EIO;
 	}
 
+	nct_vrm_busy_enter();
 	v_mv = nct_vrm_decode_vout_mv(vout, vout_mode, vout_exp);
 	p_mw = nct_vrm_linear11_milli(pout);
 	t_mc = nct_vrm_linear11_milli(temp);
@@ -312,6 +411,7 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
 		raw[NCT_VRM_IIN] = iin;
 		raw[NCT_VRM_PIN] = pin;
 	}
+	nct_vrm_busy_leave();
 	return 0;
 }
 

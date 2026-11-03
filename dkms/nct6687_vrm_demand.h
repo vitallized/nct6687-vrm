@@ -49,7 +49,7 @@ static unsigned long nct_vrm_fail_interval(unsigned fails, unsigned long hz)
  */
 static bool nct_vrm_should_sample(bool valid, bool demanded, bool last_read_set,
 	unsigned long gap, unsigned long last_updated_age, unsigned long hz,
-	unsigned long floor, unsigned fails)
+	unsigned long floor, unsigned fails, bool force_floor)
 {
 	unsigned long interval;
 
@@ -57,7 +57,12 @@ static bool nct_vrm_should_sample(bool valid, bool demanded, bool last_read_set,
 		interval = nct_vrm_fail_interval(fails, hz);
 	else if (!demanded)
 		interval = hz;
-	else if (!last_read_set || gap >= hz)
+	/* force_floor is the prefetch timer. It is aimed just under 1 s, and
+	 * the cache is one sample (~70 ms) younger than the gap, so the gap
+	 * rule below would skip it every time. The 20 ms floor still applies.
+	 * Fail backoff above is unchanged.
+	 */
+	else if (force_floor || !last_read_set || gap >= hz)
 		interval = floor;
 	else if (gap > floor)
 		interval = gap;
@@ -161,7 +166,7 @@ static int nct_vrm_demand_body(struct nct6687_data* data, void* vctx)
 
 /* now/hz/floor are jiffies. floor is the 20 ms demand floor from the caller. */
 static void nct_vrm_demand_session(struct nct6687_data* data, unsigned long hz,
-	unsigned long floor, u8 addr, int vout_exp, bool sample_gt)
+	unsigned long floor, u8 addr, int vout_exp, bool sample_gt, bool force_floor)
 {
 	struct nct_vrm_rail* cpu = &data->vrm_rail[0];
 	struct nct_vrm_rail* gt = &data->vrm_rail[1];
@@ -185,7 +190,7 @@ static void nct_vrm_demand_session(struct nct6687_data* data, unsigned long hz,
 	}
 
 	if (!nct_vrm_should_sample(cpu->valid, demanded, last_read_set, gap, age,
-			hz, floor, data->vrm_fail_count))
+			hz, floor, data->vrm_fail_count, force_floor))
 		return;
 
 	job.addr = addr;

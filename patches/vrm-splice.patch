@@ -124,13 +124,29 @@
  static struct nct6687_data *nct6687_update_device(struct device *dev)
  {
  	struct nct6687_data *data = dev_get_drvdata(dev);
-@@ -928,6 +970,9 @@
- 
- 	mutex_unlock(&data->update_lock);
- 
-+	/* VRM: EC_io_lock only — do not hold update_lock across SMBus */
+@@ -913,21 +955,8 @@
+-	mutex_lock(&data->update_lock);
+-
+-	if (time_after(jiffies, data->last_updated + HZ) || !data->valid) {
+-		/* Measured voltages and limits */
+-		nct6687_update_voltage(data);
+-
+-		/* Measured temperatures and limits */
+-		nct6687_update_temperatures(data);
+-
+-		/* Measured fan speeds and limits */
+-		nct6687_update_fans(data);
+-
+-		data->last_updated = jiffies;
+-		data->valid = true;
+-	}
+-
+-	mutex_unlock(&data->update_lock);
++	/* No update_lock and no EC access. The worker owns the 1 Hz scan,
++	 * so a voltage read cannot wait on a PAGE sample.
++	 */
 +	nct6687_update_vrm(data);
-+
+
  	return data;
  }
  
@@ -175,7 +191,7 @@
  	mutex_init(&data->fan_watchdog_lock);
  	INIT_DELAYED_WORK(&data->fan_watchdog_work, nct6687_fan_watchdog_work);
  	platform_set_drvdata(pdev, data);
-@@ -1721,8 +1776,23 @@
+@@ -1721,8 +1776,24 @@
  	nct6687_setup_temperatures(data);
  	nct6687_setup_voltages(data);
  
@@ -198,6 +214,7 @@
 +		if (data->vrm_enabled)
 +			data->extra_groups[eg++] = &nct6687_vrm_group;
 +	}
++	nct_vrm_prime(data);
  
  	scnprintf(build, sizeof(build), "%02d/%02d/%02d", nct6687_read(data, NCT6687_REG_BUILD_MONTH), nct6687_read(data, NCT6687_REG_BUILD_DAY), nct6687_read(data, NCT6687_REG_BUILD_YEAR));
  

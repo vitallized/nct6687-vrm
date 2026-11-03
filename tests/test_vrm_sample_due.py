@@ -98,6 +98,16 @@ def test_vrm_sysfs_read_returns_the_cached_sample() -> None:
     assert "nct_vrm_snap_read" in cpu
     assert "nct_vrm_kick(data, true)" in show
     assert "nct_vrm_kick(data, true)" in cpu
+    assert "cancel_delayed_work_sync" in text
+    assert "nct_vrm_prefetch_note" in text
+    run = text.split("static void nct_vrm_run_sample", 1)[1].split("\nstatic void nct_vrm_now_work_fn", 1)[0]
+    assert "if (prefetch)" in run
+    assert "vrm_demand" in run
+    assert "vrm_sample_age" in text
+    for name in ("vrm_sample_age_show", "vrm_sample_age_at_read_show", "vrm_prefetch_state_show", "vrm_busy_ns_show"):
+        body = text.split(f"static ssize_t {name}", 1)[1].split("\nstatic ", 1)[0]
+        assert "nct_vrm_kick" not in body
+        assert "nct_vrm_prefetch_note(" not in body
     assert "vrm_demand = true" in enter
     assert "nct_vrm_session_lock" in enter
     assert "nct_vrm_sample_mos" in enter
@@ -125,6 +135,7 @@ def test_first_demand_after_idle_samples_when_cache_older_than_20ms(
     assert got["fail"] == 0
     assert got["demand"] == 0
     assert got["ctrl_valid"] == 1
+    assert got["sleep_busy"] == 0
 
 
 def test_background_valid_skips_when_cache_younger_than_1s(c_mailbox_bin: Path) -> None:
@@ -242,6 +253,53 @@ def test_demand_matches_50ms_poll_gap(c_mailbox_bin: Path) -> None:
     )
     assert got["io"] == 1
     assert got["read_gap"] == 50
+
+
+def test_prefetch_floor_samples_when_the_gap_rule_skips(c_mailbox_bin: Path) -> None:
+    # Kick stamped last_read, then the PAGE sample finished 70 ms later.
+    # Prefetch starts 990 ms after that stamp. Cache age is 920. The gap
+    # rule wants 990 and skips. The prefetch floor still samples.
+    skipped = _demand(
+        c_mailbox_bin,
+        now=10_990,
+        demanded=True,
+        last_read=10_000,
+        last_updated=10_070,
+        cpu_valid=True,
+    )
+    assert skipped["io"] == 0
+    got = _demand(
+        c_mailbox_bin,
+        now=10_990,
+        demanded=True,
+        last_read=10_000,
+        last_updated=10_070,
+        cpu_valid=True,
+        extra=("--force-floor",),
+    )
+    assert got["io"] == 1
+
+
+def test_prefetch_floor_keeps_the_20ms_floor_and_fail_backoff(c_mailbox_bin: Path) -> None:
+    young = _demand(
+        c_mailbox_bin,
+        now=10_010,
+        demanded=True,
+        last_read=10_000,
+        last_updated=10_000,
+        cpu_valid=True,
+        extra=("--force-floor",),
+    )
+    assert young["io"] == 0
+    backed_off = _demand(
+        c_mailbox_bin,
+        now=10_000,
+        demanded=True,
+        last_updated=10_000 - 100,
+        fails=4,
+        extra=("--force-floor",),
+    )
+    assert backed_off["io"] == 0
 
 
 def test_demand_floor_blocks_sub_20ms(c_mailbox_bin: Path) -> None:
