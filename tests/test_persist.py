@@ -15,7 +15,7 @@ import nct6687_vrm_overlay_tree as tree
 import nct6687_vrm_persist as persist
 
 ROOT = Path(__file__).resolve().parents[1]
-STOCK_R257 = Path(__file__).resolve().parent / "fixtures" / "nct6687_r257.c"
+STOCK_R263 = Path(__file__).resolve().parent / "fixtures" / "nct6687_r263.c"
 
 
 def _layout(tmp_path: Path) -> persist.PersistLayout:
@@ -164,7 +164,7 @@ def test_pre_transaction_restores_spliced_source_before_clear(
     persist.install(ROOT, layout)
     pkg = tmp_path / "src"
     pkg.mkdir()
-    stock = STOCK_R257.read_text()
+    stock = STOCK_R263.read_text()
     src = pkg / "nct6687.c"
     src.write_text(splice.apply(stock))
     bak = tree.backup_path(src)
@@ -185,7 +185,7 @@ def test_pre_transaction_keeps_includes_when_spliced_without_backup(
     pkg = tmp_path / "src"
     pkg.mkdir()
     src = pkg / "nct6687.c"
-    src.write_text(splice.apply(STOCK_R257.read_text()))
+    src.write_text(splice.apply(STOCK_R263.read_text()))
     inc = pkg / tree.INC_NAME
     inc.write_text("inc\n")
     monkeypatch.setattr(tree, "_pacman_owned_files", lambda: set())
@@ -316,7 +316,7 @@ def _ready_splice(tmp_path: Path) -> tuple[persist.PersistLayout, Path]:
     pkg = tmp_path / "src"
     pkg.mkdir()
     src = pkg / "nct6687.c"
-    shutil.copy2(STOCK_R257, src)
+    shutil.copy2(STOCK_R263, src)
     return layout, src
 
 
@@ -325,7 +325,7 @@ def test_post_transaction_splices_and_records_rebuild(tmp_path: Path) -> None:
     rebuilt: list[Path] = []
     rc = persist.post_transaction(layout, ROOT, src=src, rebuild=rebuilt.append)
     assert rc == 0
-    assert src.read_text() == splice.apply(STOCK_R257.read_text())
+    assert src.read_text() == splice.apply(STOCK_R263.read_text())
     assert rebuilt == [src]
 
 

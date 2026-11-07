@@ -1,7 +1,7 @@
-"""The committed splice patch against frozen stock nct6687d r257.
+"""The committed splice patch against frozen stock nct6687d r263.
 
-tests/fixtures/nct6687_r257.c is the packaged nct6687.c from
-nct6687d-dkms-git r257.ec1030b-1 (sha256 matches the alpm mtree),
+tests/fixtures/nct6687_r263.c is the packaged nct6687.c from
+nct6687d-dkms-git r263.49ac9bc-1 (sha256 matches the alpm mtree),
 GPL-2.0-or-later per its SPDX header. Test input only; never built or shipped.
 """
 
@@ -13,12 +13,12 @@ import pytest
 
 import nct6687_vrm_overlay_splice as splice
 
-STOCK_R257 = Path(__file__).resolve().parent / "fixtures" / "nct6687_r257.c"
+STOCK_R263 = Path(__file__).resolve().parent / "fixtures" / "nct6687_r263.c"
 
 
 @pytest.fixture(scope="module")
 def stock() -> str:
-    return STOCK_R257.read_text()
+    return STOCK_R263.read_text()
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +31,7 @@ def _func(text: str, signature: str) -> str:
     return text[start : text.index("\n}\n", start)]
 
 
-def test_applies_to_stock_r257(stock: str, spliced: str) -> None:
+def test_applies_to_stock_r263(stock: str, spliced: str) -> None:
     assert not splice.is_spliced(stock)
     assert splice.is_spliced(spliced)
     assert '#include "nct6687_vrm.inc.c"' in spliced
@@ -57,7 +57,7 @@ def test_ec_window_locked_again(spliced: str) -> None:
     assert pair.count("nct6687_read_nolock") == 2
     assert "nct6687_read(" not in read16
     assert "nct6687_read_pair" in read16
-    assert spliced.count("nct6687_read_pair") >= 5
+    assert spliced.count("nct6687_read_pair") >= 4
     assert spliced.count("mutex_init(&data->EC_io_lock);") == 1
 
 
@@ -79,12 +79,15 @@ def test_probe_registers_vrm_group(spliced: str) -> None:
     assert "nct_vrm_prime(data);" in probe
     assert probe.index("nct6687_init_device(data);") < probe.index("nct_vrm_prime(data);")
     assert probe.index("nct_vrm_prime(data);") < probe.index("devm_hwmon_device_register_with_info(")
-    assert "data->extra_groups[eg++] = &nct6687_vrm_group;" in spliced
-    assert "data->extra_groups[0] = &nct6687_fan_watchdog_group;" not in spliced
+    assert probe.index("nct_vrm_refresh_sensors(data);") < probe.index("nct_vrm_prime(data);")
+    assert "data->extra_groups[0] = nct6687_fan_watchdog_groups[0];" in probe
+    assert "data->extra_groups[1] = &nct6687_vrm_group;" in probe
+    assert "&nct6687_chip_info, data->extra_groups);" in probe
+    assert "nct6687_fan_watchdog_groups);" not in probe
 
 
 def test_ioregion_unchanged_on_offset4(stock: str, spliced: str) -> None:
-    """r257 claims BAR+4..+7 already; the splice must not widen it."""
+    """r263 claims BAR+4..+7 already; the splice must not widen it."""
     assert "#define IOREGION_OFFSET 4" in stock
     assert "#define IOREGION_LENGTH 4" in spliced
 
@@ -101,8 +104,8 @@ def test_forward_refuses_spliced_text_without_marker(spliced: str) -> None:
 
 def test_drifted_anchor_rejects(stock: str) -> None:
     drifted = stock.replace(
-        "const struct attribute_group *extra_groups[2];",
-        "const struct attribute_group *extra_groups[4];",
+        "&nct6687_chip_info, nct6687_fan_watchdog_groups);",
+        "&nct6687_chip_info, nct6687_other_groups);",
         1,
     )
     with pytest.raises(SystemExit, match="rejected"):
@@ -112,8 +115,8 @@ def test_drifted_anchor_rejects(stock: str) -> None:
 def test_outer_context_drift_rejects_without_fuzz(stock: str) -> None:
     """Fuzz 1 would drop this outermost context line and apply anyway."""
     lines = stock.splitlines(keepends=True)
-    assert lines[656] == "\tenum kinds kind;\n"
-    lines[656] = "\tenum kinds kind; /* drifted */\n"
+    assert lines[669] == "\tenum kinds kind;\n"
+    lines[669] = "\tenum kinds kind; /* drifted */\n"
     with pytest.raises(SystemExit, match="rejected"):
         splice.apply("".join(lines))
 

@@ -14,7 +14,7 @@ import nct6687_vrm_overlay_tree as tree
 import nct6687_vrm_persist as manifest
 
 ROOT = Path(__file__).resolve().parents[1]
-STOCK_R257 = Path(__file__).resolve().parent / "fixtures" / "nct6687_r257.c"
+STOCK_R263 = Path(__file__).resolve().parent / "fixtures" / "nct6687_r263.c"
 
 
 @dataclass
@@ -44,10 +44,10 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setattr(manifest, "REPO_ROOT", checkout)
     monkeypatch.setattr(manifest, "INSTALLED_LIB", layout.lib)
     monkeypatch.setattr(tree, "_pacman_owned_files", lambda: set())
-    pkg = tmp_path / "usr" / "src" / "nct6687d-r257"
+    pkg = tmp_path / "usr" / "src" / "nct6687d-r263"
     pkg.mkdir(parents=True)
     src = pkg / "nct6687.c"
-    shutil.copy2(STOCK_R257, src)
+    shutil.copy2(STOCK_R263, src)
     tree.inject(src)
     sys_module = tmp_path / "sys" / "module" / "nct6687"
     (sys_module / "parameters").mkdir(parents=True)

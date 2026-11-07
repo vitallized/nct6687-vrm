@@ -12,18 +12,18 @@ import nct6687_vrm_overlay_splice as splice
 import nct6687_vrm_overlay_tree as tree
 import nct6687_vrm_persist as manifest
 
-STOCK_R257 = Path(__file__).resolve().parent / "fixtures" / "nct6687_r257.c"
+STOCK_R263 = Path(__file__).resolve().parent / "fixtures" / "nct6687_r263.c"
 
 
 @pytest.fixture
 def stock() -> str:
-    return STOCK_R257.read_text()
+    return STOCK_R263.read_text()
 
 
 @pytest.fixture
 def pkg(tmp_path: Path, stock: str) -> Path:
-    """A fake distro DKMS tree holding stock r257."""
-    d = tmp_path / "nct6687d-r257"
+    """A fake distro DKMS tree holding stock r263."""
+    d = tmp_path / "nct6687d-r263"
     d.mkdir()
     (d / "nct6687.c").write_text(stock)
     (d / "Kbuild").write_text(tree.MINIMAL_KBUILD)
