@@ -30,6 +30,7 @@ static void nct_vrm_warn_recover(void);
 static bool nct_vrm_claim_demand(struct nct6687_data* data);
 static bool nct_vrm_claim_full(struct nct6687_data* data);
 static unsigned nct_vrm_fast_mode(void);
+static unsigned long nct_vrm_eff_tau_ms(void);
 static void nct_vrm_warn_shortcuts(unsigned bits);
 
 /* While only vrm_cpu is read, a full sample (every word, the controller
@@ -169,9 +170,9 @@ static int nct_vrm_demand_body(struct nct6687_data* data, void* vctx)
 
 	nct_vrm_rail_apply(cpu, job->sample);
 	data->vrm_full_at = nct_vrm_now();
-	nct_vrm_eff_update(&data->vrm_eff_init, &data->vrm_eff_pout_uw,
-		&data->vrm_eff_pin_uw, &data->vrm_eff_at_ms,
-		job->sample[NCT_VRM_POUT], job->sample[NCT_VRM_PIN],
+	nct_vrm_eff_update_n(&data->vrm_eff_init, &data->vrm_eff_pout_uw,
+		&data->vrm_eff_pin_uw, &data->vrm_eff_at_ms, &data->vrm_eff_n,
+		nct_vrm_eff_tau_ms(), job->sample[NCT_VRM_POUT], job->sample[NCT_VRM_PIN],
 		nct_vrm_eff_now_ms());
 	data->vrm_last_updated = nct_vrm_now();
 

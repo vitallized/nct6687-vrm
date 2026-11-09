@@ -203,11 +203,36 @@ static int nct_vrm_eff_agree(long pout_uw, long pin_uw)
  * refresh the idle timer. The default constant is wide enough that real
  * spikes pass. Either power <= 0 still fails nct_vrm_eff_agree.
  */
-static void nct_vrm_eff_update(bool* init, long* pout, long* pin,
-	unsigned long* at_ms, long sample_pout, long sample_pin,
-	unsigned long now_ms)
+/* Fewest samples behind a published efficiency. Measured 2026-11-08 under
+ * a game load (MS-7D89, 5 Hz full samples): one sample's POUT/PIN is off by
+ * 19 points (sd) and pinned at 100% four times in ten, because each word is
+ * read at a different instant of a load that moves faster than a sample.
+ * Five samples: 17 points; the window below does the rest.
+ */
+#define NCT_VRM_EFF_MIN_N 5U
+
+/* blend, but no lighter than a plain mean of the n samples since the seed
+ * (warm-up: the first sample no longer weighs a whole window).
+ */
+static long nct_vrm_eff_blend_n(long prev, long sample, unsigned long dt_ms,
+	unsigned long tau_ms, unsigned n)
+{
+	if (dt_ms == 0)
+		return prev;
+	if (n > 1 && (unsigned long long)dt_ms * n < (unsigned long long)tau_ms + dt_ms)
+		return prev + (long)(((long long)sample - prev) / (long long)n);
+	return nct_vrm_eff_blend(prev, sample, dt_ms, tau_ms);
+}
+
+/* nct_vrm_eff_update with a sample count (warm-up; NULL = none) and the
+ * window in ms. n counts samples since the seed and saturates.
+ */
+static void nct_vrm_eff_update_n(bool* init, long* pout, long* pin,
+	unsigned long* at_ms, unsigned* n, unsigned long tau_ms, long sample_pout,
+	long sample_pin, unsigned long now_ms)
 {
 	unsigned long dt;
+	unsigned k;
 
 	if (sample_pout < 0 || sample_pin < 0) {
 		if (*init && now_ms - *at_ms > NCT_VRM_EFF_IDLE_MS)
@@ -219,14 +244,31 @@ static void nct_vrm_eff_update(bool* init, long* pout, long* pin,
 		*pin = sample_pin;
 		*at_ms = now_ms;
 		*init = true;
+		if (n)
+			*n = 1;
 		return;
 	}
 	if (!nct_vrm_eff_agree(sample_pout, sample_pin))
 		return;
 	dt = now_ms - *at_ms;
-	*pout = nct_vrm_eff_blend(*pout, sample_pout, dt, NCT_VRM_EFF_TAU_MS);
-	*pin = nct_vrm_eff_blend(*pin, sample_pin, dt, NCT_VRM_EFF_TAU_MS);
+	k = 0;
+	if (n) {
+		if (*n < 0xffffU)
+			(*n)++;
+		k = *n;
+	}
+	*pout = nct_vrm_eff_blend_n(*pout, sample_pout, dt, tau_ms, k);
+	*pin = nct_vrm_eff_blend_n(*pin, sample_pin, dt, tau_ms, k);
 	*at_ms = now_ms;
+}
+
+/* No warm-up count, default window (host tests and older callers). */
+static inline void nct_vrm_eff_update(bool* init, long* pout, long* pin,
+	unsigned long* at_ms, long sample_pout, long sample_pin,
+	unsigned long now_ms)
+{
+	nct_vrm_eff_update_n(init, pout, pin, at_ms, NULL, NCT_VRM_EFF_TAU_MS,
+		sample_pout, sample_pin, now_ms);
 }
 
 /* 1 and *pwm set. 0 when there is no reading. POUT above PIN stays at the 100% cap. */

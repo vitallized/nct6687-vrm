@@ -22,6 +22,8 @@
 	long vrm_eff_pout_uw;
 	long vrm_eff_pin_uw;
 	unsigned long vrm_eff_at_ms;
+	/* Samples in the average since its seed (warm-up, NCT_VRM_EFF_MIN_N). */
+	unsigned vrm_eff_n;
 	unsigned long vrm_read_gap;
 	unsigned vrm_fail_count;
 	/* PAGE 1 only. A GT miss backs off without slowing the CPU rail. */

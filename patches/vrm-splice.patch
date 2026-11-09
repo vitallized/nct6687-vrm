@@ -18,11 +18,16 @@
  	bool valid;					/* true if following fields are valid */
  	unsigned long last_updated; /* In jiffies */
  
-@@ -721,24 +725,46 @@
+@@ -721,24 +725,57 @@
  		nct6687_voltage_config_active[index].label;
  }
  
 -static u16 nct6687_read(struct nct6687_data *data, u16 address)
++/* vrm_fast is the VRM module parameter (nct6687_vrm.inc.c). Bit 0: this
++ * register read skips the port-0x80 pause too, like the VRM mailbox.
++ */
++static int vrm_fast;
++
 +/* Port sequence only. Caller holds EC_io_lock. */
 +static u16 nct6687_read_nolock(struct nct6687_data *data, u16 address)
  {
@@ -30,6 +35,12 @@
  	u8 index = (u8)(address & 0xFF);
 -	int res;
  
++	if (vrm_fast & 1) {
++		outb(EC_SPACE_PAGE_SELECT, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
++		outb(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
++		outb(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
++		return inb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
++	}
  	outb_p(EC_SPACE_PAGE_SELECT, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
  	outb_p(page, data->addr + EC_SPACE_PAGE_REGISTER_OFFSET);
  	outb_p(index, data->addr + EC_SPACE_INDEX_REGISTER_OFFSET);
@@ -69,7 +80,7 @@
  }
  
  static void nct6687_write(struct nct6687_data *data, u16 address, u16 value)
-@@ -746,10 +772,12 @@
+@@ -746,10 +783,12 @@
  	u8 page = (u8)(address >> 8);
  	u8 index = (u8)(address & 0xFF);
  
@@ -82,7 +93,7 @@
  }
  
  static bool nct6687_uses_msi_fan_curve(int index)
-@@ -836,8 +864,13 @@
+@@ -836,8 +875,13 @@
  		if (!NCT6687_TEMP_ENABLED(i))
  			continue;
  
@@ -98,7 +109,7 @@
  		temperature = (value * 1000) + (500 * half);
  
  		data->temperature[i] = temperature;
-@@ -855,9 +888,13 @@
+@@ -855,9 +899,13 @@
  	/* Measured voltages and limits */
  	for (index = 0; index < NCT6687_NUM_REG_VOLTAGE; index++) {
  		s16 reg = manual ? index : nct6687_voltage_config_active[index].reg;
@@ -115,7 +126,7 @@
  		/*
  		 * value (max 4095) * multiplier (12 for +12V rail) reaches
  		 * ~49140 mV, which overflows s16. Use s32 to keep rail values
-@@ -912,27 +949,20 @@
+@@ -912,27 +960,20 @@
  	}
  }
  
@@ -153,7 +164,7 @@
  
  	return data;
  }
-@@ -1542,6 +1572,7 @@
+@@ -1542,6 +1583,7 @@
  		 data->sioreg);
  
  	mutex_init(&data->update_lock);
@@ -161,7 +172,7 @@
  	mutex_init(&data->fan_watchdog_lock);
  	INIT_DELAYED_WORK(&data->fan_watchdog_work, nct6687_fan_watchdog_work);
  	platform_set_drvdata(pdev, data);
-@@ -1553,13 +1584,30 @@
+@@ -1553,13 +1595,30 @@
  
  	nct6687_init_device(data);
  

@@ -67,6 +67,11 @@ static unsigned nct_vrm_fast_mode(void)
 	return host_fast;
 }
 
+static unsigned long nct_vrm_eff_tau_ms(void)
+{
+	return 10000;
+}
+
 static unsigned host_shortcuts_warned;
 
 static void nct_vrm_warn_shortcuts(unsigned bits)

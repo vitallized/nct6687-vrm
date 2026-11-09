@@ -33,6 +33,14 @@ static int vrm_fast;
 module_param(vrm_fast, int, 0444);
 MODULE_PARM_DESC(vrm_fast, "eSIO access bits: 1 no port pause, 2 keep ctrl, 4 keep proto/addr, 8 no CLEAR pulse (default 0)");
 
+/* Efficiency window: the smoothed POUT and PIN follow a change with this
+ * time constant. Shorter is quicker and noisier (game load, 5 Hz samples:
+ * 10 s +-3 points, 5 s +-5, 3 s +-6.5, 1 s +-10).
+ */
+static int vrm_eff_tau = 10;
+module_param(vrm_eff_tau, int, 0444);
+MODULE_PARM_DESC(vrm_eff_tau, "Efficiency averaging window, seconds (1..60, default 10)");
+
 static int vrm_vout_exp = -10;
 module_param(vrm_vout_exp, int, 0444);
 MODULE_PARM_DESC(vrm_vout_exp, "Fallback LINEAR16 exp if VOUT_MODE unknown (-16..15)");
@@ -78,6 +86,11 @@ static unsigned nct_vrm_fast_mode(void)
 {
     /* NOPAUSE | KEEP_CTRL | KEEP_SETUP | NO_CLEAR; the mailbox header comes later. */
     return (unsigned)vrm_fast & 0x0fu;
+}
+
+static unsigned long nct_vrm_eff_tau_ms(void)
+{
+    return (unsigned long)clamp(vrm_eff_tau, 1, 60) * 1000UL;
 }
 
 static void nct_vrm_warn_shortcuts(unsigned bits)
@@ -131,6 +144,7 @@ struct nct_vrm_snap {
     long ctrl_min;
     long ctrl_max;
     bool eff_init;
+    unsigned eff_n;
     long eff_pout_uw;
     long eff_pin_uw;
     bool mos_hist_init;
@@ -171,6 +185,7 @@ static void nct_vrm_publish_snap(struct nct6687_data* data, bool stamped)
     nct_vrm_snap.ctrl_min = data->vrm_ctrl_min;
     nct_vrm_snap.ctrl_max = data->vrm_ctrl_max;
     nct_vrm_snap.eff_init = data->vrm_eff_init;
+    nct_vrm_snap.eff_n = data->vrm_eff_n;
     nct_vrm_snap.eff_pout_uw = data->vrm_eff_pout_uw;
     nct_vrm_snap.eff_pin_uw = data->vrm_eff_pin_uw;
     nct_vrm_snap.mos_hist_init = data->vrm_mos_hist_init;
@@ -271,6 +286,13 @@ static void nct_vrm_arm_now(void)
  * full: the reader shows more than vrm_cpu (VOUT IOUT POUT), so the next
  * sample reads every word.
  */
+/* Background (fan/temp reads) keeps VRM sampling at 1 Hz only while a VRM
+ * attribute was read this recently. A fan daemon or desktop widget that
+ * never shows VRM values then costs no PMBus traffic.
+ */
+#define NCT_VRM_BG_HOLD_MS 10000UL
+static unsigned long nct_vrm_last_demand_ms;
+
 static void nct_vrm_kick(struct nct6687_data* data, bool demand, bool full)
 {
     struct nct_vrm_prefetch_plan plan;
@@ -279,6 +301,10 @@ static void nct_vrm_kick(struct nct6687_data* data, bool demand, bool full)
     if (!READ_ONCE(nct_vrm_work_data))
         return;
     if (!demand) {
+        unsigned long last = READ_ONCE(nct_vrm_last_demand_ms);
+
+        if (!last || nct_vrm_mono_ms() - last > NCT_VRM_BG_HOLD_MS)
+            return;
         /* 1 Hz background only when no prefetch is already waiting.
          * Never the delayed work: that timer belongs to the hit path.
          */
@@ -286,6 +312,7 @@ static void nct_vrm_kick(struct nct6687_data* data, bool demand, bool full)
             schedule_work(&nct_vrm_now_work);
         return;
     }
+    WRITE_ONCE(nct_vrm_last_demand_ms, nct_vrm_mono_ms() ? nct_vrm_mono_ms() : 1);
     if (full)
         WRITE_ONCE(data->vrm_demand_full, true);
     WRITE_ONCE(data->vrm_demand, true);
@@ -315,10 +342,12 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_demand_full = false;
     data->vrm_full_at = 0;
     data->vrm_full_asked_at = 0;
+    nct_vrm_last_demand_ms = 0;
     data->vrm_last_updated = 0;
     data->vrm_last_read = 0;
     nct_vrm_eff_reset(&data->vrm_eff_init);
     data->vrm_eff_pout_uw = 0;
+    data->vrm_eff_n = 0;
     data->vrm_eff_pin_uw = 0;
     data->vrm_eff_at_ms = 0;
     data->vrm_read_gap = 0;
@@ -723,7 +752,8 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
     if (ch->metric == NCT_VRM_EFF) {
         if (sattr->index != NCT_VRM_INPUT)
             rc = -EINVAL;
-        else if (!nct_vrm_eff_publish(snap.eff_init, snap.eff_pout_uw,
+        else if (snap.eff_n < NCT_VRM_EFF_MIN_N ||
+            !nct_vrm_eff_publish(snap.eff_init, snap.eff_pout_uw,
                 snap.eff_pin_uw, &val))
             rc = -ENODATA;
     } else {

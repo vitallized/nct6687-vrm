@@ -374,6 +374,33 @@ int main(int argc, char** argv)
 			printf("%ld\n", pwm);
 		return 0;
 	}
+	if (argc == 2 && !strcmp(argv[1], "eff_warmup")) {
+		/* A first pair with POUT > PIN (76 W / 53 W, seen live), then
+		 * 4 pairs at 90 W / 100 W, 200 ms apart, 10 s window. The plain
+		 * mean during warm-up gives (76 + 360) / (53 + 400) = 96%; the
+		 * old seed-weighted blend stays at 100% (POUT >= PIN).
+		 */
+		bool init = false;
+		long pout = 0, pin = 0, pwm = 0;
+		unsigned long at = 0;
+		unsigned n = 0;
+		int i;
+
+		nct_vrm_eff_update_n(&init, &pout, &pin, &at, &n, 10000, 76000000L, 53000000L, 0);
+		for (i = 1; i <= 4; i++)
+			nct_vrm_eff_update_n(&init, &pout, &pin, &at, &n, 10000, 90000000L,
+				100000000L, i * 200);
+		nct_vrm_eff_publish(init, pout, pin, &pwm);
+		printf("%u %ld\n", n, pwm / 2);
+		/* Old blend from the same samples. */
+		init = false;
+		nct_vrm_eff_update(&init, &pout, &pin, &at, 76000000L, 53000000L, 0);
+		for (i = 1; i <= 4; i++)
+			nct_vrm_eff_update(&init, &pout, &pin, &at, 90000000L, 100000000L, i * 200);
+		nct_vrm_eff_publish(init, pout, pin, &pwm);
+		printf("%ld\n", pwm / 2);
+		return 0;
+	}
 	if (argc == 2 && !strcmp(argv[1], "sweep_rigor"))
 		return sweep_rigor();
 	if (argc == 2 && !strcmp(argv[1], "eff_hold")) {
