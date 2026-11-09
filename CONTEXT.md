@@ -36,6 +36,14 @@ _Avoid_: STRUCT_FIELDS, Python field list
 Per-device min/max of PAGE samples, plus the stock VRM MOS thermistor (`temp3`). A negative IOUT, IIN, POUT, or PIN is logged and not published; the live value stays at the last non-negative reading, so it cannot become the high. IOUT, IIN, and PIN are two's complement Direct. POUT can still be a LINEAR11 spike. VOUT/VIN/TEMP still take the signed value. POUT and PIN are published as `power*_input_lowest` / `power*_input_highest` so `sensors` prints lowest then highest.
 _Avoid_: hwmon chip min
 
+**lite sample**:
+A demand refresh that reads VOUT, IOUT and POUT only, while `vrm_cpu` is the only VRM attribute read. The other words keep the last full sample; a full sample runs at least every 2 s, and every sample is full for 5 s after any other VRM attribute is read.
+_Avoid_: partial scan, fast sample
+
+**eSIO session**:
+The demand session's hold on the eSIO window under `EC_io_lock`. Inside it the window is known idle after the session's own op, so the idle check is skipped, and `vrm_fast=1` applies (no port pause). The `/dev/port` helper never opens one.
+_Avoid_: lock scope, fast mode
+
 **VRM demand**:
 A VRM sysfs read (not a fan/temp attr) returns the cached PAGE sample and does not wait on the eSIO mailbox. A steady burst interval prefetches the next refresh so the sample is tens of milliseconds old, not a full interval. First demand after idle, a jumpy gap, or first-ever, refreshes on the read and uses the 20 ms floor. Background (fan/temp hook) stays 1 Hz and uses that same refresh. Consecutive PAGE failures back off (HZ/4 → 8 Hz).
 _Avoid_: 1 Hz as the HUD rate

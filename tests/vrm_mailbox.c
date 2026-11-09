@@ -52,6 +52,21 @@ static bool nct_vrm_claim_demand(struct nct6687_data* data)
 	return demanded;
 }
 
+static bool nct_vrm_claim_full(struct nct6687_data* data)
+{
+	bool full = data->vrm_demand_full;
+
+	data->vrm_demand_full = false;
+	return full;
+}
+
+static unsigned host_fast;
+
+static unsigned nct_vrm_fast_mode(void)
+{
+	return host_fast;
+}
+
 static void nct_vrm_note_negative(int metric, long val)
 {
 	(void)metric;
@@ -362,6 +377,7 @@ int main(int argc, char** argv)
 	unsigned long then_now = 0;
 	unsigned long then_last_read = 0;
 	int have_then = 0;
+	int then_full = 0;
 
 	regs[0x03] = 0;
 	regs[0x60] = 0;
@@ -440,6 +456,26 @@ int main(int argc, char** argv)
 			demand_gap = strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--demand")) {
 			demand_on = 1;
+		} else if (!strcmp(argv[i], "--fast") && i + 1 < argc) {
+			host_fast = (unsigned)strtoul(argv[++i], NULL, 0);
+		} else if (!strcmp(argv[i], "--full-at") && i + 1 < argc) {
+			data.vrm_full_at = strtoul(argv[++i], NULL, 0);
+		} else if (!strcmp(argv[i], "--then-full")) {
+			then_full = 1;
+		} else if (!strcmp(argv[i], "--full-asked-at") && i + 1 < argc) {
+			data.vrm_full_asked_at = strtoul(argv[++i], NULL, 0);
+		} else if (!strcmp(argv[i], "--want-full")) {
+			data.vrm_demand_full = true;
+		} else if (!strcmp(argv[i], "--rail") && i + 1 < argc) {
+			/* Previous published CPU rail, enum nct_vrm_metric order: VOUT,VIN,IOUT,POUT,TEMP,IIN,PIN. */
+			char* q = argv[++i];
+			int m;
+
+			for (m = 0; m < NCT_VRM_NMETRIC; m++) {
+				data.vrm_rail[0].val[m] = strtol(q, &q, 0);
+				if (*q == ',')
+					q++;
+			}
 		} else if (!strcmp(argv[i], "--force-floor")) {
 			force_floor = 1;
 		} else if (!strcmp(argv[i], "--cpu-valid")) {
@@ -579,6 +615,7 @@ int main(int argc, char** argv)
 			demand_now = then_now;
 			data.vrm_last_read = then_last_read;
 			data.vrm_demand = true;
+			data.vrm_demand_full = then_full;
 			nct_vrm_demand_session(&data, demand_hz, demand_floor, a, -10, sample_gt,
 				force_floor);
 		}
@@ -594,6 +631,24 @@ int main(int argc, char** argv)
 		printf("ctrl_valid=%d\n", data.vrm_ctrl_valid ? 1 : 0);
 		printf("ctrl_mc=%ld\n", data.vrm_ctrl_mc);
 		printf("sleep_busy=%u\n", nct_vrm_host_sleep_busy);
+		printf("ports=%d\n", nlog - before);
+		{
+			int k, idle_checks = 0;
+
+			for (k = before; k < nlog && k < LOG_MAX; k++)
+				if (log_buf[k].op == 'i' && log_buf[k].port == base + EC_SPACE_PAGE_REGISTER_OFFSET)
+					idle_checks++;
+			printf("idle_checks=%d\n", idle_checks);
+		}
+		printf("pm_ops=%d\n", pm_nops);
+		printf("full_at=%lu\n", data.vrm_full_at);
+		printf("want_full=%d\n", data.vrm_demand_full ? 1 : 0);
+		{
+			int m;
+
+			for (m = 0; m < NCT_VRM_NMETRIC; m++)
+				printf("rail%d=%ld\n", m, data.vrm_rail[0].val[m]);
+		}
 		return 0;
 	}
 	if (!strcmp(fn, "mux") && argc - i == 2) {

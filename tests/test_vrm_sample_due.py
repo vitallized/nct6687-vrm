@@ -96,8 +96,10 @@ def test_vrm_sysfs_read_returns_the_cached_sample() -> None:
     assert "nct_vrm_session_enter" not in cpu
     assert "nct_vrm_snap_read" in show
     assert "nct_vrm_snap_read" in cpu
-    assert "nct_vrm_kick(data, true)" in show
-    assert "nct_vrm_kick(data, true)" in cpu
+    # vrm_cpu shows VOUT IOUT POUT only, so it may get a lite sample; every
+    # other VRM read asks for a full one.
+    assert "nct_vrm_kick(data, true, true)" in show
+    assert "nct_vrm_kick(data, true, false)" in cpu
     assert "cancel_delayed_work_sync" in text
     assert "nct_vrm_prefetch_note" in text
     run = text.split("static void nct_vrm_run_sample", 1)[1].split("\nstatic void nct_vrm_now_work_fn", 1)[0]
@@ -537,6 +539,8 @@ def test_gt_retries_after_its_backoff(c_mailbox_bin: Path) -> None:
             "10251",
             "--then-last-read",
             "10100",
+            # A GT attribute read asks for a full sample (a lite one skips GT).
+            "--then-full",
         ),
     )
     assert got["cpu_valid"] == 1
@@ -560,3 +564,62 @@ def test_good_sample_stores_vout_and_clears_fail(c_mailbox_bin: Path) -> None:
     assert got["fail"] == 0
     assert got["vout"] == 1000
     assert got["last_updated"] == 10_000
+
+
+# Lite samples: a vrm_cpu-only reader gets VOUT, IOUT, POUT (3 words), and the
+# other words keep the last full sample, until NCT_VRM_FULL_EVERY (2 * HZ).
+PREV_RAIL = "1200,12000,5000,6000000,45000,600,7000000"  # VOUT VIN IOUT POUT TEMP IIN PIN
+
+
+def _lite(c_mailbox_bin: Path, *extra: str, full_at: int = 9_500) -> dict[str, int]:
+    return _demand(
+        c_mailbox_bin,
+        now=10_000,
+        demanded=True,
+        last_read=9_900,
+        last_updated=9_900,
+        cpu_valid=True,
+        # PAGE and VOUT_MODE already cached, as after the first sample.
+        extra=("--cache-page", "0", "--cache-mode", "0=0x17", "--full-at", str(full_at), "--rail", PREV_RAIL, *extra),
+    )
+
+
+def test_cpu_only_demand_within_full_every_reads_three_words(c_mailbox_bin: Path) -> None:
+    got = _lite(c_mailbox_bin)
+    # mux save/arm/restore are not PMBus ops; the body is VOUT, IOUT, POUT.
+    assert got["pm_ops"] == 3
+    assert got["full_at"] == 9_500
+    # The words not read keep the previous full sample's values.
+    assert (got["rail1"], got["rail4"], got["rail5"], got["rail6"]) == (12000, 45000, 600, 7000000)
+    assert got["last_updated"] == 10_000
+
+
+def test_full_reader_gets_every_word_and_the_controller(c_mailbox_bin: Path) -> None:
+    got = _lite(c_mailbox_bin, "--want-full")
+    assert got["pm_ops"] == 8  # TEMP VOUT VIN IOUT IIN POUT PIN + controller 0x8E
+    assert got["full_at"] == 10_000
+    assert got["want_full"] == 0
+
+
+def test_lite_turns_full_after_full_every(c_mailbox_bin: Path) -> None:
+    got = _lite(c_mailbox_bin, full_at=10_000 - 2 * HZ)
+    assert got["pm_ops"] == 8
+    assert got["full_at"] == 10_000
+
+
+def test_lite_waits_while_a_full_reader_is_recent(c_mailbox_bin: Path) -> None:
+    # hwinfo or sensors read 3 s ago: every sample stays full, so POUT and PIN
+    # shown together come from one sample.
+    got = _lite(c_mailbox_bin, "--full-asked-at", str(10_000 - 3 * HZ))
+    assert got["pm_ops"] == 8
+    got = _lite(c_mailbox_bin, "--full-asked-at", str(10_000 - 5 * HZ))
+    assert got["pm_ops"] == 3
+
+
+def test_session_checks_idle_once_and_nopause_keeps_the_access_count(c_mailbox_bin: Path) -> None:
+    base = _lite(c_mailbox_bin, "--want-full")
+    nopause = _lite(c_mailbox_bin, "--want-full", "--fast", "1")
+    # The session left the window idle itself after its first op.
+    assert base["idle_checks"] == 1
+    # NOPAUSE changes the instruction (inb vs inb_p), not the accesses.
+    assert nopause["ports"] == base["ports"]

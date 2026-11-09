@@ -28,6 +28,19 @@ static void nct_vrm_ec_lock(struct nct6687_data* data);
 static void nct_vrm_ec_unlock(struct nct6687_data* data);
 static void nct_vrm_warn_recover(void);
 static bool nct_vrm_claim_demand(struct nct6687_data* data);
+static bool nct_vrm_claim_full(struct nct6687_data* data);
+static unsigned nct_vrm_fast_mode(void);
+
+/* While only vrm_cpu is read, a full sample (every word, the controller
+ * temperature, efficiency, GT) still runs this often; the samples between
+ * read VOUT, IOUT and POUT only.
+ */
+#define NCT_VRM_FULL_EVERY(hz) (2 * (hz))
+/* A full reader (hwmon channels, vrm_cpu_full) seen this recently keeps
+ * every sample full, so the values it shows come from one moment (a lite
+ * sample's POUT next to a 2 s old PIN read as POUT > PIN).
+ */
+#define NCT_VRM_FULL_HOLD(hz) (5 * (hz))
 
 /* First fail stays ~HZ/4; then HZ, 2*HZ, cap 8*HZ. fails==0 uses the
  * first-fail slot so a cold invalid cache still retries at HZ/4.
@@ -86,6 +99,7 @@ struct nct_vrm_demand_job {
 	u8 addr;
 	int vout_exp;
 	bool sample_gt;
+	bool lite;
 	unsigned long hz;
 	long sample[NCT_VRM_NMETRIC];
 };
@@ -119,6 +133,19 @@ static int nct_vrm_demand_body(struct nct6687_data* data, void* vctx)
 	struct nct_vrm_rail* cpu = &data->vrm_rail[0];
 	struct nct_vrm_rail* gt = &data->vrm_rail[1];
 
+	if (job->lite) {
+		/* The other words keep the last full sample's values, so the hist
+		 * sees nothing new for them.
+		 */
+		memcpy(job->sample, cpu->val, sizeof(job->sample));
+		if (nct_vrm_sample_page_words(data, job->addr, 0, job->vout_exp, job->sample,
+				NULL, true))
+			return -EIO;
+		nct_vrm_rail_apply(cpu, job->sample);
+		data->vrm_last_updated = nct_vrm_now();
+		return 0;
+	}
+
 	if (nct_vrm_sample_page(data, job->addr, 0, job->vout_exp, job->sample, NULL))
 		return -EIO;
 
@@ -135,6 +162,7 @@ static int nct_vrm_demand_body(struct nct6687_data* data, void* vctx)
 	}
 
 	nct_vrm_rail_apply(cpu, job->sample);
+	data->vrm_full_at = nct_vrm_now();
 	nct_vrm_eff_update(&data->vrm_eff_init, &data->vrm_eff_pout_uw,
 		&data->vrm_eff_pin_uw, &data->vrm_eff_at_ms,
 		job->sample[NCT_VRM_POUT], job->sample[NCT_VRM_PIN],
@@ -197,9 +225,17 @@ static void nct_vrm_demand_session(struct nct6687_data* data, unsigned long hz,
 	job.vout_exp = vout_exp;
 	job.sample_gt = sample_gt;
 	job.hz = hz;
+	/* Claimed only when sampling, so a skipped session does not drop it. */
+	if (nct_vrm_claim_full(data))
+		data->vrm_full_asked_at = now ? now : 1;
+	job.lite = demanded && cpu->valid && data->vrm_full_at &&
+		now - data->vrm_full_at < NCT_VRM_FULL_EVERY(hz) &&
+		(!data->vrm_full_asked_at || now - data->vrm_full_asked_at >= NCT_VRM_FULL_HOLD(hz));
 	nct_vrm_ec_lock(data);
+	nct_vrm_win_session(true, nct_vrm_fast_mode());
 	phase = nct_vrm_mux_cycle(data, 0, nct_vrm_demand_body, NULL,
 		nct_vrm_demand_fail, &job, NCT_VRM_MUX_RESTORE_CHECKED);
+	nct_vrm_win_session(false, 0);
 	/* Reset the fail count only after the PAGE sample and the mux restore
 	 * both succeed. A failed restore drops the cache so backoff applies.
 	 * ARM/BODY already ran demand_fail inside the cycle, before restore.

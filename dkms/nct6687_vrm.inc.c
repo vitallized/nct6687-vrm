@@ -24,6 +24,13 @@ static int vrm_addr = 0xC0;
 module_param(vrm_addr, int, 0444);
 MODULE_PARM_DESC(vrm_addr, "PMBus 8-bit write address (default 0xC0)");
 
+/* 1 = port I/O without the 0x80 pause (see nct6687_vrm_mailbox.h). 0 is
+ * the access pattern of every earlier release.
+ */
+static int vrm_fast;
+module_param(vrm_fast, int, 0444);
+MODULE_PARM_DESC(vrm_fast, "eSIO access: 1 = no port pause (default 0)");
+
 static int vrm_vout_exp = -10;
 module_param(vrm_vout_exp, int, 0444);
 MODULE_PARM_DESC(vrm_vout_exp, "Fallback LINEAR16 exp if VOUT_MODE unknown (-16..15)");
@@ -58,6 +65,17 @@ static void nct_vrm_warn_recover(void)
 static bool nct_vrm_claim_demand(struct nct6687_data* data)
 {
     return xchg(&data->vrm_demand, false);
+}
+
+static bool nct_vrm_claim_full(struct nct6687_data* data)
+{
+    return xchg(&data->vrm_demand_full, false);
+}
+
+static unsigned nct_vrm_fast_mode(void)
+{
+    /* NCT_VRM_FAST_NOPAUSE; the mailbox header comes later. */
+    return (unsigned)vrm_fast & 0x01u;
 }
 
 static void nct_vrm_note_negative(int metric, long val)
@@ -215,11 +233,16 @@ static bool nct_vrm_prefetch_busy(void)
         work_busy(&nct_vrm_prefetch_work.work);
 }
 
-static void nct_vrm_arm_prefetch(unsigned long delay_ms)
+/* chain: the prefetch that just ran arms the next one interval - duration
+ * after it finished, which already keeps its phase. Taking the slack off
+ * that too ran the chain every interval - 80 ms: at a 200 ms reader, a
+ * sample every ~120 ms, two per read (measured 2026-11-08).
+ */
+static void nct_vrm_arm_prefetch(unsigned long delay_ms, bool chain)
 {
     unsigned long flags, lead = delay_ms;
 
-    if (lead > NCT_VRM_PREFETCH_SLACK_MS)
+    if (!chain && lead > NCT_VRM_PREFETCH_SLACK_MS)
         lead -= NCT_VRM_PREFETCH_SLACK_MS;
     spin_lock_irqsave(&nct_vrm_prefetch_lock, flags);
     nct_vrm_prefetch_state.arm_n++;
@@ -238,8 +261,10 @@ static void nct_vrm_arm_now(void)
 
 /* demand: this read wants the 20 ms floor, not the 1 Hz background rate.
  * A steady reader prefetches. A fan hook must not cancel that timer.
+ * full: the reader shows more than vrm_cpu (VOUT IOUT POUT), so the next
+ * sample reads every word.
  */
-static void nct_vrm_kick(struct nct6687_data* data, bool demand)
+static void nct_vrm_kick(struct nct6687_data* data, bool demand, bool full)
 {
     struct nct_vrm_prefetch_plan plan;
     unsigned long flags, age_ms;
@@ -254,6 +279,8 @@ static void nct_vrm_kick(struct nct6687_data* data, bool demand)
             schedule_work(&nct_vrm_now_work);
         return;
     }
+    if (full)
+        WRITE_ONCE(data->vrm_demand_full, true);
     WRITE_ONCE(data->vrm_demand, true);
     age_ms = nct_vrm_sample_age_ms();
     spin_lock_irqsave(&nct_vrm_prefetch_lock, flags);
@@ -269,7 +296,7 @@ static void nct_vrm_kick(struct nct6687_data* data, bool demand)
     if (plan.act != NCT_VRM_PREFETCH_LATER && nct_vrm_prefetch_busy())
         return;
     if (plan.delay_ms)
-        nct_vrm_arm_prefetch(plan.delay_ms);
+        nct_vrm_arm_prefetch(plan.delay_ms, false);
     if (plan.act != NCT_VRM_PREFETCH_LATER)
         nct_vrm_arm_now();
 }
@@ -278,6 +305,9 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
 {
     data->vrm_enabled = enabled;
     data->vrm_demand = false;
+    data->vrm_demand_full = false;
+    data->vrm_full_at = 0;
+    data->vrm_full_asked_at = 0;
     data->vrm_last_updated = 0;
     data->vrm_last_read = 0;
     nct_vrm_eff_reset(&data->vrm_eff_init);
@@ -495,7 +525,7 @@ static void nct_vrm_run_sample(bool prefetch)
      * the next period. A now-work must not move a timer the read already set.
      */
     if (delay && (prefetch || !nct_vrm_prefetch_busy()))
-        nct_vrm_arm_prefetch(delay);
+        nct_vrm_arm_prefetch(delay, sampled && prefetch);
 }
 
 static void nct_vrm_now_work_fn(struct work_struct* work)
@@ -554,7 +584,7 @@ static void nct6687_update_vrm(struct nct6687_data* data)
     /* Background hook. Demand flag stays clear, so the session keeps 1 Hz.
      * Do not sample here: a fan read must not block on the mailbox.
      */
-    nct_vrm_kick(data, false);
+    nct_vrm_kick(data, false, true);
 }
 
 static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, char* buf)
@@ -572,7 +602,7 @@ static ssize_t vrm_cpu_show(struct device* dev, struct device_attribute* attr, c
     if (!data->vrm_enabled)
         return -ENODATA;
     nct_vrm_snap_read(&snap);
-    nct_vrm_kick(data, true);
+    nct_vrm_kick(data, true, false);
     if (snap.rail[0].valid) {
         vout = snap.rail[0].val[NCT_VRM_VOUT];
         iout = snap.rail[0].val[NCT_VRM_IOUT];
@@ -594,7 +624,7 @@ static ssize_t vrm_cpu_full_show(struct device* dev, struct device_attribute* at
     if (!data->vrm_enabled)
         return -ENODATA;
     nct_vrm_snap_read(&snap);
-    nct_vrm_kick(data, true);
+    nct_vrm_kick(data, true, true);
     if (!snap.rail[0].valid)
         return -ENODATA;
     return nct_vrm_format_cpu_full(buf, snap.rail[0].val);
@@ -682,7 +712,7 @@ static ssize_t nct_vrm_show(struct device* dev, struct device_attribute* attr, c
      * The snap is one publish. eff_publish reads two smoothed powers.
      */
     nct_vrm_snap_read(&snap);
-    nct_vrm_kick(data, true);
+    nct_vrm_kick(data, true, true);
     if (ch->metric == NCT_VRM_EFF) {
         if (sattr->index != NCT_VRM_INPUT)
             rc = -EINVAL;
@@ -862,7 +892,7 @@ static ssize_t nct_vrm_ctrl_show(struct device* dev, struct device_attribute* at
     if (!data->vrm_enabled)
         return -ENODATA;
     nct_vrm_snap_read(&snap);
-    nct_vrm_kick(data, true);
+    nct_vrm_kick(data, true, true);
     switch (sattr->index) {
     case NCT_VRM_INPUT:
         if (!snap.ctrl_valid)

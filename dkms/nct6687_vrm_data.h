@@ -9,6 +9,12 @@
 #define NCT_VRM_NMETRIC 7 /* enum nct_vrm_metric in nct6687_vrm_decode.h */
 	bool vrm_enabled;
 	bool vrm_demand;
+	/* A reader of more than vrm_cpu asked since the last full sample. */
+	bool vrm_demand_full;
+	/* jiffies of the last full PAGE sample (all words + controller), 0 = none. */
+	unsigned long vrm_full_at;
+	/* jiffies a full reader last asked (claimed at a sample), 0 = never. */
+	unsigned long vrm_full_asked_at;
 	unsigned long vrm_last_updated;
 	unsigned long vrm_last_read;
 	/* Efficiency uses these, not the latest POUT/PIN words. */

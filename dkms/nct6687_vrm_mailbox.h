@@ -38,6 +38,31 @@ u8 nct_vrm_host_inb(u16 port);
 void nct_vrm_host_udelay(unsigned us);
 void nct_vrm_host_usleep_range(unsigned min_us, unsigned max_us);
 typedef uint64_t u64;
+#endif
+
+/* vrm_fast bits (module parameter; default 0, the traffic every release
+ * before it used). Only a session started with nct_vrm_win_session(true)
+ * uses them: the /dev/port helper and plain host tests never do.
+ *   NOPAUSE: inb/outb without the port-0x80 pause write of inb_p/outb_p.
+ * Tried and dropped (2026-11-08, MS-7D89): keeping page 4 selected across
+ * a transaction's ops (INDEX + DATA only). Every word read back 0; this EC
+ * needs 0xFF then the page before each access, as the stock driver does.
+ */
+#define NCT_VRM_FAST_NOPAUSE 0x01
+
+/* Window state, one writer (the caller holds EC_io_lock). */
+static struct {
+	/* A session is on: trust idle_known, apply fast. */
+	bool session;
+	unsigned fast;
+	/* This session last left PAGE at 0xFF itself, so the idle check is
+	 * known to pass. Stock reads leave PAGE elsewhere, but they take
+	 * EC_io_lock, which the session holds throughout.
+	 */
+	bool idle_known;
+} nct_vrm_win;
+
+#ifdef NCT_VRM_MAILBOX_HOST
 
 static inline void nct_vrm_outb(u16 port, u8 val)
 {
@@ -54,10 +79,15 @@ static inline void nct_vrm_usleep_range(unsigned min_us, unsigned max_us)
 #else
 static inline void nct_vrm_outb(u16 port, u8 val)
 {
-	outb_p(val, port);
+	if (nct_vrm_win.session && (nct_vrm_win.fast & NCT_VRM_FAST_NOPAUSE))
+		outb(val, port);
+	else
+		outb_p(val, port);
 }
 static inline u8 nct_vrm_inb(u16 port)
 {
+	if (nct_vrm_win.session && (nct_vrm_win.fast & NCT_VRM_FAST_NOPAUSE))
+		return inb(port);
 	return inb_p(port);
 }
 static inline void nct_vrm_usleep_range(unsigned min_us, unsigned max_us)
@@ -131,15 +161,46 @@ static int nct_vrm_idle(struct nct6687_data* data)
 {
 	int i;
 
-	if (nct_vrm_inb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET) == 0xff)
+	if (nct_vrm_win.session && nct_vrm_win.idle_known)
 		return 0;
+	if (nct_vrm_inb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET) == 0xff)
+		goto idle;
 	nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0xff);
 	for (i = 0; i < 10; i++) {
 		if (nct_vrm_inb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET) == 0xff)
-			return 0;
+			goto idle;
 		nct_vrm_udelay(100);
 	}
 	return -EBUSY;
+idle:
+	nct_vrm_win.idle_known = true;
+	return 0;
+}
+
+/* Start or end a session (the demand session, under EC_io_lock). Off
+ * forgets what the window looked like: the lock is about to drop.
+ */
+static inline void nct_vrm_win_session(bool on, unsigned fast)
+{
+	nct_vrm_win.session = on;
+	nct_vrm_win.fast = on ? fast : 0;
+	nct_vrm_win.idle_known = false;
+}
+
+/* Idle check (skipped when this session left the window idle), then select. */
+static int nct_vrm_win_open(struct nct6687_data* data, u8 page)
+{
+	if (nct_vrm_idle(data))
+		return -EBUSY;
+	nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, page);
+	return 0;
+}
+
+/* Back to the idle page. */
+static void nct_vrm_win_close(struct nct6687_data* data)
+{
+	nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0xff);
+	nct_vrm_win.idle_known = true;
 }
 
 static int nct_vrm_esio_write(struct nct6687_data* data, u8 index, u8 value)
@@ -147,13 +208,12 @@ static int nct_vrm_esio_write(struct nct6687_data* data, u8 index, u8 value)
 	int rc = 0;
 
 	nct_vrm_busy_enter();
-	if (nct_vrm_idle(data))
+	if (nct_vrm_win_open(data, 0x04))
 		rc = -EBUSY;
 	else {
-		nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0x04);
 		nct_vrm_outb(data->addr + EC_SPACE_INDEX_REGISTER_OFFSET, index);
 		nct_vrm_outb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET, value);
-		nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0xff);
+		nct_vrm_win_close(data);
 	}
 	nct_vrm_busy_leave();
 	return rc;
@@ -164,13 +224,12 @@ static int nct_vrm_esio_read(struct nct6687_data* data, u8 page, u8 index, u8* o
 	int rc = 0;
 
 	nct_vrm_busy_enter();
-	if (nct_vrm_idle(data))
+	if (nct_vrm_win_open(data, page))
 		rc = -EBUSY;
 	else {
-		nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, page);
 		nct_vrm_outb(data->addr + EC_SPACE_INDEX_REGISTER_OFFSET, index);
 		*out = nct_vrm_inb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
-		nct_vrm_outb(data->addr + EC_SPACE_PAGE_REGISTER_OFFSET, 0xff);
+		nct_vrm_win_close(data);
 	}
 	nct_vrm_busy_leave();
 	return rc;
@@ -269,63 +328,74 @@ static int nct_vrm_recover(struct nct6687_data* data)
 	return nct_vrm_esio_write(data, 0x60, 0x00);
 }
 
-static int nct_vrm_write_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8 value)
+/* Clear, program proto/addr/cmd (and the payload byte when has_value), EN,
+ * then START. 0 or -EIO.
+ */
+static int nct_vrm_arm_start(struct nct6687_data* data, u8 proto, u8 addr, u8 cmd,
+	bool has_value, u8 value)
+{
+	int rc;
+
+	rc = nct_vrm_prep_clear(data) || nct_vrm_esio_write(data, 0x63, proto)
+		|| nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
+		|| (has_value && nct_vrm_esio_write(data, 0x70, value))
+		|| nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN);
+	if (!rc) {
+		nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
+		rc = nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START);
+	}
+	return rc ? -EIO : 0;
+}
+
+/* After START cleared: status, then n payload bytes from 0xB0 on (n <= 2).
+ * 0 or -EIO (a nonzero status included).
+ */
+static int nct_vrm_fetch(struct nct6687_data* data, u8* payload, unsigned n)
 {
 	u8 sts;
+	unsigned i;
+	int rc;
 
-	if (nct_vrm_prep_clear(data) || nct_vrm_esio_write(data, 0x63, NCT_VRM_PROTO_WBR)
-		|| nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
-		|| nct_vrm_esio_write(data, 0x70, value) || nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
-		return -EIO;
-	nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
-	if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
+	rc = nct_vrm_esio_read(data, 4, 0x03, &sts) || sts;
+	for (i = 0; !rc && i < n; i++)
+		rc = nct_vrm_esio_read(data, 4, 0xb0 + i, &payload[i]);
+	return rc ? -EIO : 0;
+}
+
+static int nct_vrm_write_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8 value)
+{
+	if (nct_vrm_arm_start(data, NCT_VRM_PROTO_WBR, addr, cmd, true, value))
 		return -EIO;
 	if (nct_vrm_wait_start_clear(data))
 		return -ETIMEDOUT;
-	if (nct_vrm_esio_read(data, 4, 0x03, &sts))
-		return -EIO;
-	return sts ? -EIO : 0;
+	return nct_vrm_fetch(data, NULL, 0);
 }
 
 static int nct_vrm_read_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8* out)
 {
-	u8 sts, lo;
+	u8 b[1];
 
-	if (nct_vrm_prep_clear(data) || nct_vrm_esio_write(data, 0x63, NCT_VRM_PROTO_RB)
-		|| nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
-		|| nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
-		return -EIO;
-	nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
-	if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
+	if (nct_vrm_arm_start(data, NCT_VRM_PROTO_RB, addr, cmd, false, 0))
 		return -EIO;
 	if (nct_vrm_wait_start_clear(data))
 		return -ETIMEDOUT;
-	if (nct_vrm_esio_read(data, 4, 0x03, &sts) || sts)
+	if (nct_vrm_fetch(data, b, 1))
 		return -EIO;
-	if (nct_vrm_esio_read(data, 4, 0xb0, &lo))
-		return -EIO;
-	*out = lo;
+	*out = b[0];
 	return 0;
 }
 
 static int nct_vrm_read_word(struct nct6687_data* data, u8 addr, u8 cmd, u16* out)
 {
-	u8 lo, hi, sts;
+	u8 b[2];
 
-	if (nct_vrm_prep_clear(data) || nct_vrm_esio_write(data, 0x63, NCT_VRM_PROTO_RW)
-		|| nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
-		|| nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
-		return -EIO;
-	nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
-	if (nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START))
+	if (nct_vrm_arm_start(data, NCT_VRM_PROTO_RW, addr, cmd, false, 0))
 		return -EIO;
 	if (nct_vrm_wait_start_clear(data))
 		return -ETIMEDOUT;
-	if (nct_vrm_esio_read(data, 4, 0x03, &sts) || sts)
+	if (nct_vrm_fetch(data, b, 2))
 		return -EIO;
-	if (nct_vrm_esio_read(data, 4, 0xb0, &lo) || nct_vrm_esio_read(data, 4, 0xb1, &hi))
-		return -EIO;
-	*out = lo | (hi << 8);
+	*out = b[0] | (b[1] << 8);
 	return 0;
 }
 
@@ -348,8 +418,20 @@ static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
  * enum nct_vrm_metric and is only written on success. raw may be NULL; when
  * set, it receives those same words.
  */
+static int nct_vrm_sample_page_words(struct nct6687_data* data, u8 addr, u8 page,
+	int vout_exp, long out[NCT_VRM_NMETRIC], u16* raw, bool lite);
+
 static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
 	int vout_exp, long out[NCT_VRM_NMETRIC], u16* raw)
+{
+	return nct_vrm_sample_page_words(data, addr, page, vout_exp, out, raw, false);
+}
+
+/* lite: VOUT, IOUT, POUT only (what vrm_cpu shows), in that order. out[]
+ * and raw[] keep their other slots as the caller left them.
+ */
+static int nct_vrm_sample_page_words(struct nct6687_data* data, u8 addr, u8 page,
+	int vout_exp, long out[NCT_VRM_NMETRIC], u16* raw, bool lite)
 {
 	u16 vout, iout = 0, iin = 0, pout, pin = 0, vin, temp;
 	u8 vout_mode, page_r;
@@ -379,6 +461,25 @@ static int nct_vrm_sample_page(struct nct6687_data* data, u8 addr, u8 page,
 		data->vrm_vout_mode_valid[page] = true;
 	} else {
 		vout_mode = data->vrm_vout_mode_cache[page];
+	}
+
+	if (lite) {
+		if (nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x8c, &iout)
+			|| nct_vrm_read_word(data, addr, 0x96, &pout)) {
+			nct_vrm_invalidate_smbus(data);
+			return -EIO;
+		}
+		nct_vrm_busy_enter();
+		out[NCT_VRM_VOUT] = nct_vrm_decode_vout_mv(vout, vout_mode, vout_exp);
+		out[NCT_VRM_IOUT] = nct_vrm_decode_iout_ma(iout);
+		out[NCT_VRM_POUT] = nct_vrm_linear11_milli(pout) * 1000L;
+		if (raw) {
+			raw[NCT_VRM_VOUT] = vout;
+			raw[NCT_VRM_IOUT] = iout;
+			raw[NCT_VRM_POUT] = pout;
+		}
+		nct_vrm_busy_leave();
+		return 0;
 	}
 
 	/* TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. Each word is its own command. */
