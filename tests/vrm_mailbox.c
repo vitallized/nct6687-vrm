@@ -67,6 +67,13 @@ static unsigned nct_vrm_fast_mode(void)
 	return host_fast;
 }
 
+static unsigned host_shortcuts_warned;
+
+static void nct_vrm_warn_shortcuts(unsigned bits)
+{
+	host_shortcuts_warned = bits;
+}
+
 static void nct_vrm_note_negative(int metric, long val)
 {
 	(void)metric;
@@ -632,6 +639,8 @@ int main(int argc, char** argv)
 		printf("ctrl_mc=%ld\n", data.vrm_ctrl_mc);
 		printf("sleep_busy=%u\n", nct_vrm_host_sleep_busy);
 		printf("ports=%d\n", nlog - before);
+		printf("shortcuts_warned=%u\n", host_shortcuts_warned);
+		printf("shortcuts_dead=%d\n", nct_vrm_win.shortcuts_dead ? 1 : 0);
 		{
 			int k, idle_checks = 0;
 

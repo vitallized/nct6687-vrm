@@ -49,6 +49,20 @@ typedef uint64_t u64;
  * needs 0xFF then the page before each access, as the stock driver does.
  */
 #define NCT_VRM_FAST_NOPAUSE 0x01
+/* Mailbox shortcuts (2026-11-08 trial). Each only after the session's own
+ * first transaction, from state the session itself wrote:
+ *   KEEP_CTRL: prep_clear uses the 0x60 value the session last wrote or read
+ *     instead of reading it back.
+ *   KEEP_SETUP: proto (0x63) and address (0x65) are not rewritten when they
+ *     equal what the session last wrote.
+ *   NO_CLEAR: after a transaction whose status was 0, prep_clear writes the
+ *     status bytes only, without the 0x60 CLEAR pulse.
+ * A failed sample, or a VOUT word of 0, turns all three off until reload.
+ */
+#define NCT_VRM_FAST_KEEP_CTRL 0x02
+#define NCT_VRM_FAST_KEEP_SETUP 0x04
+#define NCT_VRM_FAST_NO_CLEAR 0x08
+#define NCT_VRM_FAST_SHORTCUTS (NCT_VRM_FAST_KEEP_CTRL | NCT_VRM_FAST_KEEP_SETUP | NCT_VRM_FAST_NO_CLEAR)
 
 /* Window state, one writer (the caller holds EC_io_lock). */
 static struct {
@@ -60,7 +74,23 @@ static struct {
 	 * EC_io_lock, which the session holds throughout.
 	 */
 	bool idle_known;
+	/* Last 0x60 value written or read (START dropped: the master clears it). */
+	bool ctrl_known;
+	u8 ctrl;
+	/* Last proto and address written; bit 0 proto known, bit 1 address. */
+	u8 setup_known;
+	u8 proto;
+	u8 addr;
+	/* The last transaction finished with status 0. */
+	bool clean;
+	/* Shortcuts failed once: off until the module reloads. */
+	bool shortcuts_dead;
 } nct_vrm_win;
+
+static inline bool nct_vrm_short(unsigned bit)
+{
+	return nct_vrm_win.session && (nct_vrm_win.fast & bit);
+}
 
 #ifdef NCT_VRM_MAILBOX_HOST
 
@@ -182,9 +212,14 @@ idle:
  */
 static inline void nct_vrm_win_session(bool on, unsigned fast)
 {
+	if (nct_vrm_win.shortcuts_dead)
+		fast &= ~NCT_VRM_FAST_SHORTCUTS;
 	nct_vrm_win.session = on;
 	nct_vrm_win.fast = on ? fast : 0;
 	nct_vrm_win.idle_known = false;
+	nct_vrm_win.ctrl_known = false;
+	nct_vrm_win.setup_known = 0;
+	nct_vrm_win.clean = false;
 }
 
 /* Idle check (skipped when this session left the window idle), then select. */
@@ -214,8 +249,33 @@ static int nct_vrm_esio_write(struct nct6687_data* data, u8 index, u8 value)
 		nct_vrm_outb(data->addr + EC_SPACE_INDEX_REGISTER_OFFSET, index);
 		nct_vrm_outb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET, value);
 		nct_vrm_win_close(data);
+		if (index == 0x60) {
+			nct_vrm_win.ctrl = value & ~NCT_VRM_SMB_START;
+			nct_vrm_win.ctrl_known = true;
+		}
+	}
+	if (rc) {
+		nct_vrm_win.ctrl_known = false;
+		nct_vrm_win.setup_known = 0;
 	}
 	nct_vrm_busy_leave();
+	return rc;
+}
+
+/* proto (0x63) or address (0x65): skipped under KEEP_SETUP when unchanged. */
+static int nct_vrm_esio_setup(struct nct6687_data* data, u8 index, u8 value)
+{
+	u8* last = index == 0x63 ? &nct_vrm_win.proto : &nct_vrm_win.addr;
+	u8 bit = index == 0x63 ? 1 : 2;
+	int rc;
+
+	if (nct_vrm_short(NCT_VRM_FAST_KEEP_SETUP) && (nct_vrm_win.setup_known & bit) && *last == value)
+		return 0;
+	rc = nct_vrm_esio_write(data, index, value);
+	if (!rc) {
+		*last = value;
+		nct_vrm_win.setup_known |= bit;
+	}
 	return rc;
 }
 
@@ -230,6 +290,10 @@ static int nct_vrm_esio_read(struct nct6687_data* data, u8 page, u8 index, u8* o
 		nct_vrm_outb(data->addr + EC_SPACE_INDEX_REGISTER_OFFSET, index);
 		*out = nct_vrm_inb(data->addr + EC_SPACE_DATA_REGISTER_OFFSET);
 		nct_vrm_win_close(data);
+		if (page == 4 && index == 0x60) {
+			nct_vrm_win.ctrl = *out & ~NCT_VRM_SMB_START;
+			nct_vrm_win.ctrl_known = true;
+		}
 	}
 	nct_vrm_busy_leave();
 	return rc;
@@ -244,7 +308,11 @@ static int nct_vrm_prep_clear(struct nct6687_data* data)
 		return rc;
 	if ((rc = nct_vrm_esio_write(data, 0x04, 0xff)))
 		return rc;
-	if ((rc = nct_vrm_esio_read(data, 4, 0x60, &ctrl)))
+	if (nct_vrm_short(NCT_VRM_FAST_NO_CLEAR) && nct_vrm_win.clean)
+		return 0;
+	if (nct_vrm_short(NCT_VRM_FAST_KEEP_CTRL) && nct_vrm_win.ctrl_known)
+		ctrl = nct_vrm_win.ctrl;
+	else if ((rc = nct_vrm_esio_read(data, 4, 0x60, &ctrl)))
 		return rc;
 	if ((rc = nct_vrm_esio_write(data, 0x60, (ctrl | NCT_VRM_SMB_CLEAR) & ~NCT_VRM_SMB_START)))
 		return rc;
@@ -336,8 +404,11 @@ static int nct_vrm_arm_start(struct nct6687_data* data, u8 proto, u8 addr, u8 cm
 {
 	int rc;
 
-	rc = nct_vrm_prep_clear(data) || nct_vrm_esio_write(data, 0x63, proto)
-		|| nct_vrm_esio_write(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
+	/* prep_clear reads clean (NO_CLEAR); this transaction is not clean yet. */
+	rc = nct_vrm_prep_clear(data);
+	nct_vrm_win.clean = false;
+	rc = rc || nct_vrm_esio_setup(data, 0x63, proto)
+		|| nct_vrm_esio_setup(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
 		|| (has_value && nct_vrm_esio_write(data, 0x70, value))
 		|| nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN);
 	if (!rc) {
@@ -359,6 +430,7 @@ static int nct_vrm_fetch(struct nct6687_data* data, u8* payload, unsigned n)
 	rc = nct_vrm_esio_read(data, 4, 0x03, &sts) || sts;
 	for (i = 0; !rc && i < n; i++)
 		rc = nct_vrm_esio_read(data, 4, 0xb0 + i, &payload[i]);
+	nct_vrm_win.clean = !rc;
 	return rc ? -EIO : 0;
 }
 
@@ -418,6 +490,14 @@ static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
  * enum nct_vrm_metric and is only written on success. raw may be NULL; when
  * set, it receives those same words.
  */
+/* With shortcuts on, a VOUT word of 0 means they broke the read (a running
+ * rail is never 0 V): fail the sample so the session turns them off.
+ */
+static bool nct_vrm_short_suspect(u16 vout)
+{
+	return vout == 0 && nct_vrm_short(NCT_VRM_FAST_SHORTCUTS);
+}
+
 static int nct_vrm_sample_page_words(struct nct6687_data* data, u8 addr, u8 page,
 	int vout_exp, long out[NCT_VRM_NMETRIC], u16* raw, bool lite);
 
@@ -465,7 +545,7 @@ static int nct_vrm_sample_page_words(struct nct6687_data* data, u8 addr, u8 page
 
 	if (lite) {
 		if (nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x8c, &iout)
-			|| nct_vrm_read_word(data, addr, 0x96, &pout)) {
+			|| nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_short_suspect(vout)) {
 			nct_vrm_invalidate_smbus(data);
 			return -EIO;
 		}
@@ -483,7 +563,7 @@ static int nct_vrm_sample_page_words(struct nct6687_data* data, u8 addr, u8 page
 	}
 
 	/* TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. Each word is its own command. */
-	if (nct_vrm_read_word(data, addr, 0x8d, &temp) || nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8c, &iout) || nct_vrm_read_word(data, addr, 0x89, &iin) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x97, &pin)) {
+	if (nct_vrm_read_word(data, addr, 0x8d, &temp) || nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8c, &iout) || nct_vrm_read_word(data, addr, 0x89, &iin) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x97, &pin) || nct_vrm_short_suspect(vout)) {
 		nct_vrm_invalidate_smbus(data);
 		return -EIO;
 	}

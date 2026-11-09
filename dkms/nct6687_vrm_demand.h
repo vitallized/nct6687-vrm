@@ -30,6 +30,7 @@ static void nct_vrm_warn_recover(void);
 static bool nct_vrm_claim_demand(struct nct6687_data* data);
 static bool nct_vrm_claim_full(struct nct6687_data* data);
 static unsigned nct_vrm_fast_mode(void);
+static void nct_vrm_warn_shortcuts(unsigned bits);
 
 /* While only vrm_cpu is read, a full sample (every word, the controller
  * temperature, efficiency, GT) still runs this often; the samples between
@@ -116,6 +117,11 @@ static bool nct_vrm_gt_due(const struct nct6687_data* data, unsigned long hz)
 /* Failed window: invalidate, stamp, count, recover. Not a bad restore. */
 static int nct_vrm_demand_fail(struct nct6687_data* data)
 {
+	if (nct_vrm_win.fast & NCT_VRM_FAST_SHORTCUTS) {
+		nct_vrm_warn_shortcuts(nct_vrm_win.fast & NCT_VRM_FAST_SHORTCUTS);
+		nct_vrm_win.shortcuts_dead = true;
+		nct_vrm_win.fast &= ~NCT_VRM_FAST_SHORTCUTS;
+	}
 	data->vrm_rail[0].valid = false;
 	data->vrm_rail[1].valid = false;
 	data->vrm_ctrl_valid = false;

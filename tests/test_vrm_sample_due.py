@@ -623,3 +623,37 @@ def test_session_checks_idle_once_and_nopause_keeps_the_access_count(c_mailbox_b
     assert base["idle_checks"] == 1
     # NOPAUSE changes the instruction (inb vs inb_p), not the accesses.
     assert nopause["ports"] == base["ports"]
+
+
+def _full_fast(c_mailbox_bin: Path, fast: int, *extra: str) -> dict[str, int]:
+    return _lite(c_mailbox_bin, "--want-full", "--fast", str(fast),
+                 "--word", "0x8b=0x0500", "--word", "0x8c=0x0100", "--word", "0x96=0x0050", *extra)
+
+
+def test_each_shortcut_cuts_accesses_and_keeps_the_values(c_mailbox_bin: Path) -> None:
+    base = _full_fast(c_mailbox_bin, 1)
+    seen = {}
+    for bits in (2, 4, 8, 14):
+        got = _full_fast(c_mailbox_bin, 1 | bits)
+        assert got["ports"] < base["ports"], bits
+        assert got["shortcuts_dead"] == 0, bits
+        assert [got[f"rail{m}"] for m in range(7)] == [base[f"rail{m}"] for m in range(7)], bits
+        seen[bits] = got["ports"]
+    # All three together: about a third fewer accesses than vrm_fast=1.
+    assert seen[14] < base["ports"] * 0.72, (base["ports"], seen)
+
+
+def test_a_failed_sample_turns_the_shortcuts_off(c_mailbox_bin: Path) -> None:
+    got = _full_fast(c_mailbox_bin, 15, "--fail", "read_word:0x96=0x02")
+    assert got["cpu_valid"] == 0
+    assert got["shortcuts_dead"] == 1
+    assert got["shortcuts_warned"] == 14
+
+
+def test_a_zero_vout_with_shortcuts_fails_the_sample(c_mailbox_bin: Path) -> None:
+    got = _full_fast(c_mailbox_bin, 15, "--word", "0x8b=0x0000")
+    assert got["shortcuts_dead"] == 1
+    # Without shortcuts a zero word is published as before.
+    got = _full_fast(c_mailbox_bin, 1, "--word", "0x8b=0x0000")
+    assert got["shortcuts_dead"] == 0
+    assert got["cpu_valid"] == 1

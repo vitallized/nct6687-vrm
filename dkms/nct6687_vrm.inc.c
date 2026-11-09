@@ -24,12 +24,14 @@ static int vrm_addr = 0xC0;
 module_param(vrm_addr, int, 0444);
 MODULE_PARM_DESC(vrm_addr, "PMBus 8-bit write address (default 0xC0)");
 
-/* 1 = port I/O without the 0x80 pause (see nct6687_vrm_mailbox.h). 0 is
- * the access pattern of every earlier release.
+/* Bits (see nct6687_vrm_mailbox.h): 1 = port I/O without the 0x80 pause;
+ * 2, 4, 8 = mailbox shortcuts (keep ctrl, keep proto/addr, no CLEAR pulse),
+ * which turn themselves off after one failed sample. 0 is the access
+ * pattern of every earlier release.
  */
 static int vrm_fast;
 module_param(vrm_fast, int, 0444);
-MODULE_PARM_DESC(vrm_fast, "eSIO access: 1 = no port pause (default 0)");
+MODULE_PARM_DESC(vrm_fast, "eSIO access bits: 1 no port pause, 2 keep ctrl, 4 keep proto/addr, 8 no CLEAR pulse (default 0)");
 
 static int vrm_vout_exp = -10;
 module_param(vrm_vout_exp, int, 0444);
@@ -74,8 +76,13 @@ static bool nct_vrm_claim_full(struct nct6687_data* data)
 
 static unsigned nct_vrm_fast_mode(void)
 {
-    /* NCT_VRM_FAST_NOPAUSE; the mailbox header comes later. */
-    return (unsigned)vrm_fast & 0x01u;
+    /* NOPAUSE | KEEP_CTRL | KEEP_SETUP | NO_CLEAR; the mailbox header comes later. */
+    return (unsigned)vrm_fast & 0x0fu;
+}
+
+static void nct_vrm_warn_shortcuts(unsigned bits)
+{
+    pr_warn("VRM sample failed with vrm_fast shortcuts 0x%x; they stay off until reload\n", bits);
 }
 
 static void nct_vrm_note_negative(int metric, long val)

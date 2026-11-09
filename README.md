@@ -91,6 +91,8 @@ A VRM sysfs read returns the cached PAGE sample and does not wait on the eSIO ma
 
 **`vrm_fast=1`** (load time, default 0) uses `inb`/`outb` instead of `inb_p`/`outb_p`, which add a write to port 0x80 after each of the ~600 port accesses a sample makes. On MS-7D89 this, with lite samples and the idle check below, took a HUD sample from 10.4 ms to 1.9 ms of CPU. Compare yours with `vrm_busy_ns` (ns ÷ samples). Inside a refresh the idle check runs once: after its own first access the session knows it left the window idle.
 
+**Mailbox shortcuts (`vrm_fast` bits 2, 4, 8; trial).** Each skips a step of the per-word mailbox sequence, using state the refresh itself wrote earlier in the same refresh: `2` keeps the control register value instead of reading it back, `4` does not rewrite the protocol and address when they are unchanged, `8` drops the CLEAR pulse after a transaction that ended with status 0. All three (`vrm_fast=15`) cut port accesses per sample by about a fifth (HUD) to a third (full); on MS-7D89 a HUD sample went from 2.1 to 1.7 ms of CPU, and the shipped modprobe conf sets `vrm_fast=15`. A failed sample, or a VOUT of 0 V, turns them off until the module reloads and logs `VRM sample failed with vrm_fast shortcuts …` once.
+
 Keeping page 4 selected across a transaction (INDEX + DATA per access) was tried and does not work on this EC: every word reads back 0. It needs 0xFF and then the page before each access, as the stock driver does.
 
 GT / iGPU is PMBus PAGE 1. Usually idle if you have a discrete GPU:
