@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import shutil
 import subprocess
 import sys
@@ -356,3 +357,30 @@ def test_post_default_rebuild_systemexit_is_one(
     assert rc == 1
     assert splice.is_spliced(src.read_text())
     assert "persist:" in capsys.readouterr().err
+
+
+def _conf_options(text: str) -> list[str]:
+    toks: list[str] = []
+    for line in text.splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) >= 3 and parts[:2] == ["options", "nct6687"]:
+            toks += parts[2:]
+    return toks
+
+
+def test_shipped_conf_sets_every_vrm_option_once(tmp_path: Path) -> None:
+    # The conf is the reference: each module_param of the VRM include appears
+    # once, with a legend above it. A new option has to be added there too.
+    src = (ROOT / "dkms" / "nct6687_vrm.inc.c").read_text()
+    params = re.findall(r"^module_param\((\w+),", src, re.M)
+    conf = (ROOT / "pacman-hook" / "nct6687-vrm.conf").read_text()
+    names = [tok.split("=", 1)[0] for tok in _conf_options(conf)]
+    assert sorted(names) == sorted(params)
+    for name in params:
+        assert f"# {name}:" in conf, name
+    # Shipped values the README and install path rely on.
+    opts = dict(tok.split("=", 1) for tok in _conf_options(conf))
+    assert (opts["vrm"], opts["vrm_fast"], opts["vrm_mux_keep"]) == ("1", "31", "0")
+    # The legend's own text never reads as a setting.
+    (tmp_path / "nct6687-vrm.conf").write_text(conf)
+    assert tree.want_vrm_enabled(False, tmp_path) is True
