@@ -15,6 +15,13 @@
  * NCT_VRM_MUX_RESTORE_CHECKED — a good body's restore errors return
  * NCT_VRM_MUX_RESTORE. Without the flag both regs are written and errors
  * are ignored.
+ * NCT_VRM_MUX_KEEP_FW — when the saved 0x61 already selects mux_sel, 0x61
+ * and 0x62 are not written at all, so the transfer runs at the firmware's
+ * speed and there is nothing to restore (HWiNFO 8.55 never writes them).
+ * A held pre-arm pair, or another port selected, takes the forcing path.
+ *
+ * Each save records the pair it read in vrm_mux_seen_* (vrm_mux_seen set),
+ * so the kernel can log what the firmware left there.
  *
  * SAVE does not call on_fail and does not restore (the read never landed).
  * ARM and BODY call on_fail, then a checked restore. A failed restore sets
@@ -44,6 +51,7 @@ enum nct_vrm_mux_phase {
 
 #define NCT_VRM_MUX_FAIL_DISABLES 0x01
 #define NCT_VRM_MUX_RESTORE_CHECKED 0x02
+#define NCT_VRM_MUX_KEEP_FW 0x04
 
 static void nct_vrm_mux_remember(struct nct6687_data* data, u8 cfg, u8 baud)
 {
@@ -84,6 +92,9 @@ static int nct_vrm_mux_restore(struct nct6687_data* data, u8 cfg, u8 baud)
 	if (nct_vrm_host_reject_mux_restore && data->vrm_rail[0].valid)
 		return -EIO;
 #endif
+	/* A KEEP_FW cycle wrote neither register: nothing to put back. */
+	if (data->vrm_mux_kept)
+		return 0;
 	if (nct_vrm_esio_write(data, 0x61, cfg) || nct_vrm_esio_write(data, 0x62, baud))
 		return -EIO;
 	return 0;
@@ -109,6 +120,7 @@ static enum nct_vrm_mux_phase nct_vrm_mux_cycle(struct nct6687_data* data,
 	int (*on_fail)(struct nct6687_data* data), void* ctx, unsigned flags)
 {
 	u8 cfg = 0, baud = 0;
+	bool held = data->vrm_mux_hold;
 	int rc;
 
 	/* A failed restore leaves port 0 / baud 0x03 in the registers. Reading
@@ -119,11 +131,19 @@ static enum nct_vrm_mux_phase nct_vrm_mux_cycle(struct nct6687_data* data,
 		cfg = data->vrm_mux_cfg;
 		baud = data->vrm_mux_baud;
 	} else if (nct_vrm_esio_read(data, 4, 0x61, &cfg) ||
-		nct_vrm_esio_read(data, 4, 0x62, &baud))
+		nct_vrm_esio_read(data, 4, 0x62, &baud)) {
 		return NCT_VRM_MUX_SAVE;
+	} else {
+		data->vrm_mux_seen = true;
+		data->vrm_mux_seen_cfg = cfg;
+		data->vrm_mux_seen_baud = baud;
+	}
 
-	if (nct_vrm_esio_write(data, 0x61, (cfg & ~0x03) | (mux_sel & 3)) ||
-		nct_vrm_esio_write(data, 0x62, 0x03) ||
+	data->vrm_mux_kept = (flags & NCT_VRM_MUX_KEEP_FW) && !held &&
+		(cfg & 0x03) == (mux_sel & 3);
+	if ((!data->vrm_mux_kept &&
+		(nct_vrm_esio_write(data, 0x61, (cfg & ~0x03) | (mux_sel & 3)) ||
+		nct_vrm_esio_write(data, 0x62, 0x03))) ||
 		nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN))
 		return nct_vrm_mux_bail(data, on_fail, cfg, baud, NCT_VRM_MUX_ARM);
 

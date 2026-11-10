@@ -57,12 +57,18 @@ typedef uint64_t u64;
  *     equal what the session last wrote.
  *   NO_CLEAR: after a transaction whose status was 0, prep_clear writes the
  *     status bytes only, without the 0x60 CLEAR pulse.
- * A failed sample, or a VOUT word of 0, turns all three off until reload.
+ *   ONE_START (2026-11-09 trial): START is one write of EN|START, without
+ *     the EN write and 20 us gap before it. EN is already set: the mux cycle
+ *     writes 0x60=EN before the body and prep_clear writes EN back. HWiNFO
+ *     8.55 starts every transaction on this EC with that one write.
+ * A failed sample, or a VOUT word of 0, turns them all off until reload.
  */
 #define NCT_VRM_FAST_KEEP_CTRL 0x02
 #define NCT_VRM_FAST_KEEP_SETUP 0x04
 #define NCT_VRM_FAST_NO_CLEAR 0x08
-#define NCT_VRM_FAST_SHORTCUTS (NCT_VRM_FAST_KEEP_CTRL | NCT_VRM_FAST_KEEP_SETUP | NCT_VRM_FAST_NO_CLEAR)
+#define NCT_VRM_FAST_ONE_START 0x10
+#define NCT_VRM_FAST_SHORTCUTS (NCT_VRM_FAST_KEEP_CTRL | NCT_VRM_FAST_KEEP_SETUP | \
+	NCT_VRM_FAST_NO_CLEAR | NCT_VRM_FAST_ONE_START)
 
 /* Window state, one writer (the caller holds EC_io_lock). */
 static struct {
@@ -85,6 +91,15 @@ static struct {
 	bool clean;
 	/* Shortcuts failed once: off until the module reloads. */
 	bool shortcuts_dead;
+	/* Last transaction armed and how it ended, for the failure log:
+	 * last_rc 0 (good), -EIO (port error or nonzero status) or -ETIMEDOUT
+	 * (START never cleared). last_sts is the status byte when sts_read.
+	 */
+	u8 last_proto;
+	u8 last_cmd;
+	int last_rc;
+	bool sts_read;
+	u8 last_sts;
 } nct_vrm_win;
 
 static inline bool nct_vrm_short(unsigned bit)
@@ -326,6 +341,14 @@ static int nct_vrm_prep_clear(struct nct6687_data* data)
  * every ~1 ms. This kernel sleeps to the top of usleep_range. Once a word
  * has cleared, the next first-sleep is that minimum minus 1 ms. Stuck START
  * still gives up at 100 ms. Overshoot is at most one poll per word.
+ *
+ * Measured 2026-11-09 (MS-7D89, EC firmware 1.0 build 11/01/22): a refresh
+ * of 8 words takes 40-44 ms, 5 ms a word, with 0x62 written as 0x01, 0x03
+ * or 0x05 alike. Not settled: coreboot masks the master's speed field as
+ * bits 4-6 but numbers the codes in bits 0-2, so those runs may all have
+ * had the field at 0 (12.5 kHz by its names; one read word is ~47 bit
+ * times, 3.8 ms at that speed). Polling every 200-250 us instead of 800-1000 did not
+ * shorten the refresh and doubled its CPU (3.4 to 6.8 ms a sample).
  */
 #define NCT_VRM_START_FIRST_US 4000
 #define NCT_VRM_START_GUARD_US 1000
@@ -404,17 +427,23 @@ static int nct_vrm_arm_start(struct nct6687_data* data, u8 proto, u8 addr, u8 cm
 {
 	int rc;
 
+	nct_vrm_win.last_proto = proto;
+	nct_vrm_win.last_cmd = cmd;
+	nct_vrm_win.last_rc = 0;
+	nct_vrm_win.sts_read = false;
 	/* prep_clear reads clean (NO_CLEAR); this transaction is not clean yet. */
 	rc = nct_vrm_prep_clear(data);
 	nct_vrm_win.clean = false;
 	rc = rc || nct_vrm_esio_setup(data, 0x63, proto)
 		|| nct_vrm_esio_setup(data, 0x65, addr) || nct_vrm_esio_write(data, 0x66, cmd)
-		|| (has_value && nct_vrm_esio_write(data, 0x70, value))
-		|| nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN);
-	if (!rc) {
-		nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
-		rc = nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START);
+		|| (has_value && nct_vrm_esio_write(data, 0x70, value));
+	if (!rc && !nct_vrm_short(NCT_VRM_FAST_ONE_START)) {
+		rc = nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN);
+		if (!rc)
+			nct_vrm_udelay(NCT_VRM_ARM_UDELAY);
 	}
+	if (!rc)
+		rc = nct_vrm_esio_write(data, 0x60, NCT_VRM_SMB_EN | NCT_VRM_SMB_START);
 	return rc ? -EIO : 0;
 }
 
@@ -427,7 +456,12 @@ static int nct_vrm_fetch(struct nct6687_data* data, u8* payload, unsigned n)
 	unsigned i;
 	int rc;
 
-	rc = nct_vrm_esio_read(data, 4, 0x03, &sts) || sts;
+	rc = nct_vrm_esio_read(data, 4, 0x03, &sts);
+	if (!rc) {
+		nct_vrm_win.sts_read = true;
+		nct_vrm_win.last_sts = sts;
+		rc = sts != 0;
+	}
 	for (i = 0; !rc && i < n; i++)
 		rc = nct_vrm_esio_read(data, 4, 0xb0 + i, &payload[i]);
 	nct_vrm_win.clean = !rc;
@@ -437,10 +471,10 @@ static int nct_vrm_fetch(struct nct6687_data* data, u8* payload, unsigned n)
 static int nct_vrm_write_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8 value)
 {
 	if (nct_vrm_arm_start(data, NCT_VRM_PROTO_WBR, addr, cmd, true, value))
-		return -EIO;
+		return nct_vrm_win.last_rc = -EIO;
 	if (nct_vrm_wait_start_clear(data))
-		return -ETIMEDOUT;
-	return nct_vrm_fetch(data, NULL, 0);
+		return nct_vrm_win.last_rc = -ETIMEDOUT;
+	return nct_vrm_win.last_rc = nct_vrm_fetch(data, NULL, 0);
 }
 
 static int nct_vrm_read_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8* out)
@@ -448,11 +482,11 @@ static int nct_vrm_read_byte(struct nct6687_data* data, u8 addr, u8 cmd, u8* out
 	u8 b[1];
 
 	if (nct_vrm_arm_start(data, NCT_VRM_PROTO_RB, addr, cmd, false, 0))
-		return -EIO;
+		return nct_vrm_win.last_rc = -EIO;
 	if (nct_vrm_wait_start_clear(data))
-		return -ETIMEDOUT;
+		return nct_vrm_win.last_rc = -ETIMEDOUT;
 	if (nct_vrm_fetch(data, b, 1))
-		return -EIO;
+		return nct_vrm_win.last_rc = -EIO;
 	*out = b[0];
 	return 0;
 }
@@ -462,11 +496,11 @@ static int nct_vrm_read_word(struct nct6687_data* data, u8 addr, u8 cmd, u16* ou
 	u8 b[2];
 
 	if (nct_vrm_arm_start(data, NCT_VRM_PROTO_RW, addr, cmd, false, 0))
-		return -EIO;
+		return nct_vrm_win.last_rc = -EIO;
 	if (nct_vrm_wait_start_clear(data))
-		return -ETIMEDOUT;
+		return nct_vrm_win.last_rc = -ETIMEDOUT;
 	if (nct_vrm_fetch(data, b, 2))
-		return -EIO;
+		return nct_vrm_win.last_rc = -EIO;
 	*out = b[0] | (b[1] << 8);
 	return 0;
 }
@@ -481,8 +515,8 @@ static void nct_vrm_invalidate_smbus(struct nct6687_data* data)
 /*
  * Production PAGE sample — source of truth for userspace _sample_page:
  *   PAGE write+readback (cache miss), VOUT_MODE 0x20 (cached),
- *   then TEMP 0x8D, VOUT 0x8B, VIN 0x88, IOUT 0x8C, IIN 0x89, POUT 0x96, PIN 0x97.
- *   Order is TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. TEMP2 (0x8E, controller die) is one
+ *   then VOUT 0x8B, IOUT 0x8C, POUT 0x96, PIN 0x97, IIN 0x89, VIN 0x88, TEMP 0x8D.
+ *   Order is VOUT, IOUT, POUT, PIN, IIN, VIN, TEMP. TEMP2 (0x8E, controller die) is one
  *   read in the demand session, not here. TEMP3 (0x8F) is not sampled.
  *   IOUT is always READ_IOUT (Direct, 0.1 A/LSB), not POUT/VOUT.
  *   CAP 0x19 / STATUS 0x78 are not on this path (debug-only in userspace).
@@ -562,8 +596,15 @@ static int nct_vrm_sample_page_words(struct nct6687_data* data, u8 addr, u8 page
 		return 0;
 	}
 
-	/* TEMP, VOUT, VIN, IOUT, IIN, POUT, PIN. Each word is its own command. */
-	if (nct_vrm_read_word(data, addr, 0x8d, &temp) || nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x88, &vin) || nct_vrm_read_word(data, addr, 0x8c, &iout) || nct_vrm_read_word(data, addr, 0x89, &iin) || nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x97, &pin) || nct_vrm_short_suspect(vout)) {
+	/* VOUT, IOUT, POUT, PIN, IIN, VIN, TEMP. Each word is its own command and
+	 * the EC takes several ms over each, so the words that are compared with
+	 * each other (V x I against POUT, POUT against PIN, PIN against IIN) are
+	 * read back to back and the slow ones (VIN, TEMP) come last.
+	 */
+	if (nct_vrm_read_word(data, addr, 0x8b, &vout) || nct_vrm_read_word(data, addr, 0x8c, &iout)
+		|| nct_vrm_read_word(data, addr, 0x96, &pout) || nct_vrm_read_word(data, addr, 0x97, &pin)
+		|| nct_vrm_read_word(data, addr, 0x89, &iin) || nct_vrm_read_word(data, addr, 0x88, &vin)
+		|| nct_vrm_read_word(data, addr, 0x8d, &temp) || nct_vrm_short_suspect(vout)) {
 		nct_vrm_invalidate_smbus(data);
 		return -EIO;
 	}

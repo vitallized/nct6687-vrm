@@ -30,8 +30,27 @@ static void nct_vrm_warn_recover(void);
 static bool nct_vrm_claim_demand(struct nct6687_data* data);
 static bool nct_vrm_claim_full(struct nct6687_data* data);
 static unsigned nct_vrm_fast_mode(void);
+/* vrm_mux_keep: NCT_VRM_MUX_KEEP_FW for the demand cycle. */
+static bool nct_vrm_mux_keep_fw(void);
 static unsigned long nct_vrm_eff_tau_ms(void);
 static void nct_vrm_warn_shortcuts(unsigned bits);
+
+/* What a failed refresh left behind, read before the recovery clears it. */
+struct nct_vrm_fail_note {
+	const char* stage;
+	u8 proto;
+	u8 cmd;
+	int rc;
+	bool sts_read;
+	u8 sts;
+	/* The master's registers at that moment (regs_ok: they read). */
+	bool regs_ok;
+	u8 ctrl;
+	u8 cfg;
+	u8 speed;
+};
+/* Kernel logs it, ratelimited. Host tests record it. */
+static void nct_vrm_warn_fail(const struct nct_vrm_fail_note* n);
 
 /* While only vrm_cpu is read, a full sample (every word, the controller
  * temperature, efficiency, GT) still runs this often; the samples between
@@ -115,9 +134,31 @@ static bool nct_vrm_gt_due(const struct nct6687_data* data, unsigned long hz)
 		nct_vrm_fail_interval(data->vrm_gt_fails, hz);
 }
 
+/* Log the last transaction and the master's 0x60/0x61/0x62 as they are
+ * now, so a wrong port or a stuck START shows in dmesg. Three extra reads,
+ * on a failure only.
+ */
+static void nct_vrm_note_fail(struct nct6687_data* data, const char* stage)
+{
+	struct nct_vrm_fail_note n = {
+		.stage = stage,
+		.proto = nct_vrm_win.last_proto,
+		.cmd = nct_vrm_win.last_cmd,
+		.rc = nct_vrm_win.last_rc,
+		.sts_read = nct_vrm_win.sts_read,
+		.sts = nct_vrm_win.last_sts,
+	};
+
+	n.regs_ok = !nct_vrm_esio_read(data, 4, 0x60, &n.ctrl) &&
+		!nct_vrm_esio_read(data, 4, 0x61, &n.cfg) &&
+		!nct_vrm_esio_read(data, 4, 0x62, &n.speed);
+	nct_vrm_warn_fail(&n);
+}
+
 /* Failed window: invalidate, stamp, count, recover. Not a bad restore. */
 static int nct_vrm_demand_fail(struct nct6687_data* data)
 {
+	nct_vrm_note_fail(data, "sample");
 	if (nct_vrm_win.fast & NCT_VRM_FAST_SHORTCUTS) {
 		nct_vrm_warn_shortcuts(nct_vrm_win.fast & NCT_VRM_FAST_SHORTCUTS);
 		nct_vrm_win.shortcuts_dead = true;
@@ -187,6 +228,7 @@ static int nct_vrm_demand_body(struct nct6687_data* data, void* vctx)
 			gt->valid = false;
 			data->vrm_gt_fails++;
 			data->vrm_gt_fail_at = nct_vrm_now();
+			nct_vrm_note_fail(data, "GT sample");
 			if (nct_vrm_bus_recover(data))
 				nct_vrm_warn_recover();
 		} else {
@@ -241,7 +283,8 @@ static void nct_vrm_demand_session(struct nct6687_data* data, unsigned long hz,
 	nct_vrm_ec_lock(data);
 	nct_vrm_win_session(true, nct_vrm_fast_mode());
 	phase = nct_vrm_mux_cycle(data, 0, nct_vrm_demand_body, NULL,
-		nct_vrm_demand_fail, &job, NCT_VRM_MUX_RESTORE_CHECKED);
+		nct_vrm_demand_fail, &job, NCT_VRM_MUX_RESTORE_CHECKED |
+		(nct_vrm_mux_keep_fw() ? NCT_VRM_MUX_KEEP_FW : 0));
 	nct_vrm_win_session(false, 0);
 	/* Reset the fail count only after the PAGE sample and the mux restore
 	 * both succeed. A failed restore drops the cache so backoff applies.
@@ -252,6 +295,7 @@ static void nct_vrm_demand_session(struct nct6687_data* data, unsigned long hz,
 		data->vrm_fail_count = 0;
 		break;
 	case NCT_VRM_MUX_RESTORE:
+		nct_vrm_note_fail(data, "port/speed restore");
 		cpu->valid = false;
 		gt->valid = false;
 		data->vrm_ctrl_valid = false;

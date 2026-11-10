@@ -165,7 +165,7 @@ Linux `isl68137.c` DMPVR2 coefficients (src, matches that datasheet):
 | VOUT `0x40` → mV | Used on MS-7D89 | ISL68229: VOUT_MODE default `40h` = Direct 1 mV/LSB. **Family datasheet agrees.** |
 | VIN raw × 10 | Direct m=1, R=2 | ISL68229 + isl68137 agree. |
 | POUT / TEMP LINEAR11 | PROTOCOL | **Family datasheet + isl68137: Direct, not LINEAR11.** When N=0, LINEAR11 `0x0029` and Direct `0x0029` both read as 41 — **local sample cannot distinguish.** |
-| IOUT / IIN / PIN | `READ_IOUT` Direct 0.1 A/LSB (`raw * 100` mA). `READ_IIN` Direct 0.01 A/LSB (`raw * 10` mA). `READ_PIN` Direct 1 W/LSB, two's complement (`nct_vrm_i16(raw) * 1000000` µW; `0xFFFF` is −1 W). Sample order is TEMP `0x8D`, VOUT `0x8B`, VIN `0x88`, IOUT `0x8C`, IIN `0x89`, POUT `0x96`, PIN `0x97`. | IOUT datasheet: Direct 0.1 A/LSB (`0x00E5` → 22.9 A). LINEAR11 of that word is nonsense (~229 A if N=0). IIN/PIN scales are the DMPVR2 family Direct coefficients. |
+| IOUT / IIN / PIN | `READ_IOUT` Direct 0.1 A/LSB (`raw * 100` mA). `READ_IIN` Direct 0.01 A/LSB (`raw * 10` mA). `READ_PIN` Direct 1 W/LSB, two's complement (`nct_vrm_i16(raw) * 1000000` µW; `0xFFFF` is −1 W). Sample order is VOUT `0x8B`, IOUT `0x8C`, POUT `0x96`, PIN `0x97`, IIN `0x89`, VIN `0x88`, TEMP `0x8D`. | IOUT datasheet: Direct 0.1 A/LSB (`0x00E5` → 22.9 A). LINEAR11 of that word is nonsense (~229 A if N=0). IIN/PIN scales are the DMPVR2 family Direct coefficients. |
 
 **inf:** Treat MS-7D89 scalings as **DMPVR2-family** unless a RAA229131 PDF appears. PROTOCOL already warns Direct `m/R` are board-specific; POUT/TEMP-as-LINEAR11 is the weaker claim against the public family datasheet.
 
@@ -193,7 +193,9 @@ Linux `isl68137.c` DMPVR2 coefficients (src, matches that datasheet):
 | Page lock | If MCU enables protection: PAGE writable only if current or write data is `0xFF`; INDEX writable only if PAGE ≠ `0xFF`. |
 | EC operations / HWM / PECI / SMBus master **register map** | **Not in this PDF.** “Please refer to NCT6686D EC Space Specification” / “NCT6686D Family EC Space Datasheet.” Those are **not** on the public product page. |
 
-**inf:** nct6683/nct6687d `0xFF` then page, then index, then data on **port 1** matches this datasheet. The eSIO SMBus host mailbox (ctrl `0x60`, cfg `0x61`, baud `0x62`, proto `0x63`, addr `0x65`, cmd `0x66`, payload `0x70` / page4 `0xB0`) is **not** specified in any Nuvoton document we could fetch.
+**inf:** nct6683/nct6687d `0xFF` then page, then index, then data on **port 1** matches this datasheet. The eSIO SMBus host mailbox (ctrl `0x60`, cfg `0x61`, baud `0x62`, proto `0x63`, addr `0x65`, cmd `0x66`, payload `0x70` / page4 `0xB0` low and `0xB1` high) is **not** specified in any Nuvoton document we could fetch.
+
+**src (HWiNFO 8.55 build 6110, unpacked Windows binary read with Ghidra 2026-11-09; not first-party, not run):** completion status is page 4 index `0x03` when the id byte is `0xD5` (NCT6687D, DEVID `0xD590`) and index `0x02` when the id byte is `0xC7`, or `0xD4` with the next byte `0x41`. Its clear is `0x88` (`EN|CLEAR`) on ctrl `0x60`, polled for up to 10 ms until bit `0x08` drops. It waits up to 60 ms for the page port to show `0xFF`, then writes `0xFF`. It polls START for up to 15 ms. It reads one command per transaction, one word per telemetry value, with no bulk read, like this driver. Its decode for this controller family matches the driver's scales. Details and differences are in `PROTOCOL.md`, "What HWiNFO does".
 
 ### Non-Nuvoton public maps (not first-party)
 

@@ -2,22 +2,34 @@
  *
  * One place remembers min/max. The demand session decides when a PAGE sample
  * is stored. The MOS note is the stock temp3 reading, not a PMBus register.
- * IOUT/IIN/POUT/PIN: a negative is logged and not published. The live value
- * stays at the last non-negative reading (0 if there has not been one).
- * VOUT/VIN/TEMP and the MOS reading keep the signed value.
+ * IOUT/IIN/POUT/PIN: a negative is logged and not published. TEMP and the
+ * controller temperature: a reading above 200 °C is logged and not published.
+ * The live value stays at the last published reading (0 if there has not been
+ * one) and the hist does not move. VOUT/VIN, a negative TEMP and the MOS
+ * reading keep the signed value.
  */
 #ifndef NCT6687_VRM_HIST_H
 #define NCT6687_VRM_HIST_H
 
 #include "nct6687_vrm_decode.h"
 
-/* Kernel logs it. Host tests count it. Defined by the translation unit. */
-static void nct_vrm_note_negative(int metric, long val);
+/* No VR power stage or controller reads above this; a word that decodes
+ * higher is not a temperature (HWiNFO 8.55 drops it at the same line).
+ */
+#define NCT_VRM_TEMP_MAX_MC 200000L
 
-static bool nct_vrm_drops_negative(int metric)
+/* Kernel logs it. Host tests count it. Defined by the translation unit.
+ * metric is an enum nct_vrm_metric or NCT_VRM_NOTE_CTRL_TEMP.
+ */
+static void nct_vrm_note_unpublished(int metric, long val);
+
+/* True when this reading is not published and not folded into the hist. */
+static bool nct_vrm_drops(int metric, long val)
 {
-	return metric == NCT_VRM_IOUT || metric == NCT_VRM_POUT ||
-		metric == NCT_VRM_IIN || metric == NCT_VRM_PIN;
+	if (metric == NCT_VRM_TEMP)
+		return val > NCT_VRM_TEMP_MAX_MC;
+	return (metric == NCT_VRM_IOUT || metric == NCT_VRM_POUT ||
+		metric == NCT_VRM_IIN || metric == NCT_VRM_PIN) && val < 0;
 }
 
 static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
@@ -33,9 +45,9 @@ static void nct_vrm_hist_point(long* min, long* max, long val, bool first)
 }
 
 static void nct_vrm_hist_add(long* min, long* max, bool* init, long val,
-	bool reject_neg)
+	bool drop)
 {
-	if (reject_neg && val < 0)
+	if (drop)
 		return;
 	nct_vrm_hist_point(min, max, val, !*init);
 	*init = true;
@@ -49,8 +61,8 @@ static void nct_vrm_rail_apply(struct nct_vrm_rail* r,
 	int m;
 
 	for (m = 0; m < NCT_VRM_NMETRIC; m++) {
-		if (nct_vrm_drops_negative(m) && sample[m] < 0) {
-			nct_vrm_note_negative(m, sample[m]);
+		if (nct_vrm_drops(m, sample[m])) {
+			nct_vrm_note_unpublished(m, sample[m]);
 			pub[m] = r->val[m];
 		} else {
 			pub[m] = sample[m];
@@ -63,15 +75,15 @@ static void nct_vrm_rail_apply(struct nct_vrm_rail* r,
 	nct_vrm_hist_point(&r->min[NCT_VRM_VIN], &r->max[NCT_VRM_VIN],
 		sample[NCT_VRM_VIN], first);
 	nct_vrm_hist_add(&r->min[NCT_VRM_IOUT], &r->max[NCT_VRM_IOUT],
-		&r->iout_hist_init, sample[NCT_VRM_IOUT], true);
+		&r->iout_hist_init, sample[NCT_VRM_IOUT], nct_vrm_drops(NCT_VRM_IOUT, sample[NCT_VRM_IOUT]));
 	nct_vrm_hist_add(&r->min[NCT_VRM_POUT], &r->max[NCT_VRM_POUT],
-		&r->pout_hist_init, sample[NCT_VRM_POUT], true);
-	nct_vrm_hist_point(&r->min[NCT_VRM_TEMP], &r->max[NCT_VRM_TEMP],
-		sample[NCT_VRM_TEMP], first);
+		&r->pout_hist_init, sample[NCT_VRM_POUT], nct_vrm_drops(NCT_VRM_POUT, sample[NCT_VRM_POUT]));
+	nct_vrm_hist_add(&r->min[NCT_VRM_TEMP], &r->max[NCT_VRM_TEMP],
+		&r->temp_hist_init, sample[NCT_VRM_TEMP], nct_vrm_drops(NCT_VRM_TEMP, sample[NCT_VRM_TEMP]));
 	nct_vrm_hist_add(&r->min[NCT_VRM_IIN], &r->max[NCT_VRM_IIN],
-		&r->iin_hist_init, sample[NCT_VRM_IIN], true);
+		&r->iin_hist_init, sample[NCT_VRM_IIN], nct_vrm_drops(NCT_VRM_IIN, sample[NCT_VRM_IIN]));
 	nct_vrm_hist_add(&r->min[NCT_VRM_PIN], &r->max[NCT_VRM_PIN],
-		&r->pin_hist_init, sample[NCT_VRM_PIN], true);
+		&r->pin_hist_init, sample[NCT_VRM_PIN], nct_vrm_drops(NCT_VRM_PIN, sample[NCT_VRM_PIN]));
 	r->hist_init = true;
 }
 
@@ -100,13 +112,21 @@ static bool nct_vrm_rail_hist_ready(const struct nct_vrm_rail* r,
 		return r->iin_hist_init;
 	if (m == NCT_VRM_PIN)
 		return r->pin_hist_init;
+	if (m == NCT_VRM_TEMP)
+		return r->temp_hist_init;
 	return r->hist_init;
 }
 
-/* Controller die. Signed, same rule as PAGE TEMP. */
+/* Controller die. Signed, same rule as PAGE TEMP: above 200 °C it keeps the
+ * last reading (or stays invalid) and the hist does not move.
+ */
 static void nct_vrm_ctrl_note(bool* valid, bool* init, long* cur, long* min,
 	long* max, long milli_c)
 {
+	if (milli_c > NCT_VRM_TEMP_MAX_MC) {
+		nct_vrm_note_unpublished(NCT_VRM_NOTE_CTRL_TEMP, milli_c);
+		return;
+	}
 	nct_vrm_hist_point(min, max, milli_c, !*init);
 	*init = true;
 	*cur = milli_c;

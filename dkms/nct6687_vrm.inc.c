@@ -25,13 +25,22 @@ module_param(vrm_addr, int, 0444);
 MODULE_PARM_DESC(vrm_addr, "PMBus 8-bit write address (default 0xC0)");
 
 /* Bits (see nct6687_vrm_mailbox.h): 1 = port I/O without the 0x80 pause;
- * 2, 4, 8 = mailbox shortcuts (keep ctrl, keep proto/addr, no CLEAR pulse),
- * which turn themselves off after one failed sample. 0 is the access
- * pattern of every earlier release.
+ * 2, 4, 8, 16 = mailbox shortcuts (keep ctrl, keep proto/addr, no CLEAR
+ * pulse, one-write START), which turn themselves off after one failed
+ * sample. 0 is the access pattern of every earlier release.
  */
 static int vrm_fast;
 module_param(vrm_fast, int, 0444);
-MODULE_PARM_DESC(vrm_fast, "eSIO access bits: 1 no port pause, 2 keep ctrl, 4 keep proto/addr, 8 no CLEAR pulse (default 0)");
+MODULE_PARM_DESC(vrm_fast, "eSIO access bits: 1 no port pause, 2 keep ctrl, 4 keep proto/addr, 8 no CLEAR pulse, 16 one-write START (default 0)");
+
+/* Trial (2026-11-09): leave the SMBus master's port (0x61) and speed (0x62)
+ * as the firmware set them, as HWiNFO 8.55 does, when port 0 is already
+ * selected. Otherwise the refresh still forces port 0 and speed 0x03 and
+ * puts the firmware's values back afterwards.
+ */
+static bool vrm_mux_keep;
+module_param(vrm_mux_keep, bool, 0444);
+MODULE_PARM_DESC(vrm_mux_keep, "Leave the SMBus master's port and speed as the firmware set them when port 0 is selected (default 0)");
 
 /* Efficiency window: the smoothed POUT and PIN follow a change with this
  * time constant. Shorter is quicker and noisier (game load, 5 Hz samples:
@@ -84,8 +93,13 @@ static bool nct_vrm_claim_full(struct nct6687_data* data)
 
 static unsigned nct_vrm_fast_mode(void)
 {
-    /* NOPAUSE | KEEP_CTRL | KEEP_SETUP | NO_CLEAR; the mailbox header comes later. */
-    return (unsigned)vrm_fast & 0x0fu;
+    /* NOPAUSE | KEEP_CTRL | KEEP_SETUP | NO_CLEAR | ONE_START; the mailbox header comes later. */
+    return (unsigned)vrm_fast & 0x1fu;
+}
+
+static bool nct_vrm_mux_keep_fw(void)
+{
+    return vrm_mux_keep;
 }
 
 static unsigned long nct_vrm_eff_tau_ms(void)
@@ -98,7 +112,7 @@ static void nct_vrm_warn_shortcuts(unsigned bits)
     pr_warn("VRM sample failed with vrm_fast shortcuts 0x%x; they stay off until reload\n", bits);
 }
 
-static void nct_vrm_note_negative(int metric, long val)
+static void nct_vrm_note_unpublished(int metric, long val)
 {
     const char* what = "reading";
     const char* unit = "";
@@ -120,11 +134,35 @@ static void nct_vrm_note_negative(int metric, long val)
         what = "PIN";
         unit = "uW";
         break;
+    case NCT_VRM_TEMP:
+        what = "TEMP";
+        unit = "mdegC";
+        break;
+    case NCT_VRM_NOTE_CTRL_TEMP:
+        what = "CONTROLLER";
+        unit = "mdegC";
+        break;
     }
     pr_warn_ratelimited("VRM %s %ld %s not published\n", what, val, unit);
 }
 
 #include "nct6687_vrm_demand.h"
+
+static void nct_vrm_warn_fail(const struct nct_vrm_fail_note* n)
+{
+    const char* how = n->rc == -ETIMEDOUT ? "START did not clear" :
+        n->rc ? (n->sts_read ? "error status" : "port I/O failed") : "words read";
+    char sts[16] = "not read";
+    char regs[80] = "did not read";
+
+    if (n->sts_read)
+        snprintf(sts, sizeof(sts), "0x%02x", n->sts);
+    if (n->regs_ok)
+        snprintf(regs, sizeof(regs), "ctrl 0x60=0x%02x port/cfg 0x61=0x%02x speed 0x62=0x%02x",
+            n->ctrl, n->cfg, n->speed);
+    pr_warn_ratelimited("VRM %s failed: last PMBus cmd 0x%02x (proto 0x%02x) %s, status %s; master %s\n",
+        n->stage, n->cmd, n->proto, how, sts, regs);
+}
 #include "nct6687_vrm_prefetch.h"
 
 /* One refresh at a time. Sysfs does not take this lock: it copies the snap.
@@ -132,6 +170,8 @@ static void nct_vrm_note_negative(int metric, long val)
  * is not lost.
  */
 static DEFINE_MUTEX(nct_vrm_session_lock);
+/* The firmware's 0x61/0x62 have been logged since load. Session lock. */
+static bool nct_vrm_mux_logged;
 
 /* What a sysfs read is allowed to see. Published once, at the end of a
  * refresh, so a reader never waits on the mailbox and never tears a rail.
@@ -357,6 +397,11 @@ static void nct_vrm_data_reset(struct nct6687_data* data, bool enabled)
     data->vrm_mux_hold = false;
     data->vrm_mux_cfg = 0;
     data->vrm_mux_baud = 0;
+    data->vrm_mux_kept = false;
+    data->vrm_mux_seen = false;
+    data->vrm_mux_seen_cfg = 0;
+    data->vrm_mux_seen_baud = 0;
+    nct_vrm_mux_logged = false;
     data->vrm_smbus_page = -1;
     data->vrm_vout_mode_valid[0] = false;
     data->vrm_vout_mode_valid[1] = false;
@@ -452,6 +497,12 @@ static void nct_vrm_session_enter(struct nct6687_data* data, bool demand, bool f
         floor = 1;
     nct_vrm_demand_session(data, HZ, floor, (u8)(vrm_addr & 0xff), vrm_vout_exp,
         vrm_gt, force_floor);
+    if (data->vrm_mux_seen && !nct_vrm_mux_logged) {
+        nct_vrm_mux_logged = true;
+        pr_info("VRM eSIO SMBus master as the firmware left it: port/cfg 0x61=0x%02x speed 0x62=0x%02x; %s\n",
+            data->vrm_mux_seen_cfg, data->vrm_mux_seen_baud,
+            data->vrm_mux_kept ? "left as is (vrm_mux_keep)" : "forced to port 0, speed 0x03 for each refresh");
+    }
 }
 
 static void nct_vrm_session_leave(struct nct6687_data* data, bool sampled)

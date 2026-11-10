@@ -38,6 +38,8 @@ _Static_assert(NCT_VRM_PIN + 1 == NCT_VRM_NMETRIC, "NCT_VRM_NMETRIC");
 
 /* Not a val[] slot. POUT/PIN ratio, shown through pwm9 (100% = 200). */
 #define NCT_VRM_EFF 255
+/* Not a val[] slot. The controller die (0x8E), for the not-published note. */
+#define NCT_VRM_NOTE_CTRL_TEMP NCT_VRM_NMETRIC
 
 static int nct_vrm_clamp_exp(int exp)
 {

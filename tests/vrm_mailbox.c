@@ -18,6 +18,15 @@
 #define NCT_VRM_MAILBOX_HOST 1
 #include "../dkms/nct6687_vrm_demand.h"
 
+static int host_fail_notes;
+static struct nct_vrm_fail_note host_fail;
+
+static void nct_vrm_warn_fail(const struct nct_vrm_fail_note* n)
+{
+	host_fail_notes++;
+	host_fail = *n;
+}
+
 static unsigned long demand_now;
 
 static unsigned long nct_vrm_now(void)
@@ -67,6 +76,16 @@ static unsigned nct_vrm_fast_mode(void)
 	return host_fast;
 }
 
+static bool host_mux_keep;
+static bool host_stuck_start;
+/* Writes to 0x61 and 0x62 since start. */
+static int host_mux_writes;
+
+static bool nct_vrm_mux_keep_fw(void)
+{
+	return host_mux_keep;
+}
+
 static unsigned long nct_vrm_eff_tau_ms(void)
 {
 	return 10000;
@@ -79,7 +98,7 @@ static void nct_vrm_warn_shortcuts(unsigned bits)
 	host_shortcuts_warned = bits;
 }
 
-static void nct_vrm_note_negative(int metric, long val)
+static void nct_vrm_note_unpublished(int metric, long val)
 {
 	(void)metric;
 	(void)val;
@@ -227,11 +246,14 @@ void nct_vrm_host_outb(u16 port, u8 val)
 		if (win_index == 0x60) {
 			if (val & SMB_START)
 				regs[0x03] = pmbus_dev ? pm_transact() : after_start_status;
-			regs[0x60] = val & ~SMB_START;
+			/* --stuck-start: START never clears, so the wait times out. */
+			regs[0x60] = (host_stuck_start && (val & SMB_START)) ? val : (val & ~SMB_START);
 		} else if ((win_index == 0x03 || win_index == 0x04) && val == 0xff)
 			regs[win_index] = 0;
 		else
 			regs[win_index] = val;
+		if (win_index == 0x61 || win_index == 0x62)
+			host_mux_writes++;
 	}
 }
 
@@ -470,6 +492,10 @@ int main(int argc, char** argv)
 			demand_on = 1;
 		} else if (!strcmp(argv[i], "--fast") && i + 1 < argc) {
 			host_fast = (unsigned)strtoul(argv[++i], NULL, 0);
+		} else if (!strcmp(argv[i], "--mux-keep")) {
+			host_mux_keep = true;
+		} else if (!strcmp(argv[i], "--stuck-start")) {
+			host_stuck_start = true;
 		} else if (!strcmp(argv[i], "--full-at") && i + 1 < argc) {
 			data.vrm_full_at = strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--then-full")) {
@@ -646,6 +672,17 @@ int main(int argc, char** argv)
 		printf("ports=%d\n", nlog - before);
 		printf("shortcuts_warned=%u\n", host_shortcuts_warned);
 		printf("shortcuts_dead=%d\n", nct_vrm_win.shortcuts_dead ? 1 : 0);
+		printf("mux_writes=%d\n", host_mux_writes);
+		printf("fail_notes=%d\n", host_fail_notes);
+		printf("fail_cmd=%u\n", host_fail.cmd);
+		printf("fail_rc=%d\n", host_fail.rc);
+		printf("fail_sts=%d\n", host_fail.sts_read ? host_fail.sts : -1);
+		printf("fail_regs_ok=%d\n", host_fail.regs_ok ? 1 : 0);
+		printf("fail_cfg=%u\n", host_fail.cfg);
+		printf("fail_speed=%u\n", host_fail.speed);
+		printf("mux_kept=%d\n", data.vrm_mux_kept ? 1 : 0);
+		printf("cfg61=%u\n", regs[0x61]);
+		printf("cfg62=%u\n", regs[0x62]);
 		{
 			int k, idle_checks = 0;
 

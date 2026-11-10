@@ -11,6 +11,7 @@ window. A skip leaves the window alone.
 
 from __future__ import annotations
 
+import errno
 import subprocess
 from pathlib import Path
 
@@ -596,7 +597,7 @@ def test_cpu_only_demand_within_full_every_reads_three_words(c_mailbox_bin: Path
 
 def test_full_reader_gets_every_word_and_the_controller(c_mailbox_bin: Path) -> None:
     got = _lite(c_mailbox_bin, "--want-full")
-    assert got["pm_ops"] == 8  # TEMP VOUT VIN IOUT IIN POUT PIN + controller 0x8E
+    assert got["pm_ops"] == 8  # VOUT IOUT POUT PIN IIN VIN TEMP + controller 0x8E
     assert got["full_at"] == 10_000
     assert got["want_full"] == 0
 
@@ -657,3 +658,71 @@ def test_a_zero_vout_with_shortcuts_fails_the_sample(c_mailbox_bin: Path) -> Non
     got = _full_fast(c_mailbox_bin, 1, "--word", "0x8b=0x0000")
     assert got["shortcuts_dead"] == 0
     assert got["cpu_valid"] == 1
+
+
+def test_one_write_start_drops_the_en_write_and_keeps_the_values(c_mailbox_bin: Path) -> None:
+    base = _full_fast(c_mailbox_bin, 15)
+    one = _full_fast(c_mailbox_bin, 31)
+    assert one["cpu_valid"] == 1
+    assert one["shortcuts_dead"] == 0
+    assert [one[f"rail{m}"] for m in range(7)] == [base[f"rail{m}"] for m in range(7)]
+    # One 0x60=EN write (page, index, data, back to 0xFF) fewer per word.
+    assert one["pm_ops"] == base["pm_ops"]
+    assert one["ports"] == base["ports"] - 4 * base["pm_ops"]
+
+
+def test_a_failed_sample_turns_one_write_start_off_with_the_rest(c_mailbox_bin: Path) -> None:
+    got = _full_fast(c_mailbox_bin, 31, "--fail", "read_word:0x96=0x02")
+    assert got["shortcuts_dead"] == 1
+    assert got["shortcuts_warned"] == 30
+
+
+def test_mux_keep_leaves_the_firmware_port_and_speed_alone(c_mailbox_bin: Path) -> None:
+    # Port bits 0 and a speed the driver would not pick: nothing writes 0x61/0x62.
+    got = _lite(c_mailbox_bin, "--want-full", "--cfg61", "0x04", "--cfg62", "0x31", "--mux-keep")
+    assert got["cpu_valid"] == 1
+    assert got["mux_kept"] == 1
+    assert got["mux_writes"] == 0
+    assert (got["cfg61"], got["cfg62"]) == (0x04, 0x31)
+
+
+def test_mux_keep_still_forces_port_0_when_another_port_is_selected(c_mailbox_bin: Path) -> None:
+    got = _lite(c_mailbox_bin, "--want-full", "--cfg61", "0x05", "--cfg62", "0x31", "--mux-keep")
+    assert got["cpu_valid"] == 1
+    assert got["mux_kept"] == 0
+    # Armed (port 0, speed 0x03), then the firmware's pair put back.
+    assert got["mux_writes"] == 4
+    assert (got["cfg61"], got["cfg62"]) == (0x05, 0x31)
+
+
+def test_without_mux_keep_the_refresh_forces_and_restores(c_mailbox_bin: Path) -> None:
+    got = _lite(c_mailbox_bin, "--want-full", "--cfg61", "0x04", "--cfg62", "0x31")
+    assert got["mux_kept"] == 0
+    assert got["mux_writes"] == 4
+    assert (got["cfg61"], got["cfg62"]) == (0x04, 0x31)
+
+
+def test_a_good_sample_logs_no_failure(c_mailbox_bin: Path) -> None:
+    assert _lite(c_mailbox_bin, "--want-full")["fail_notes"] == 0
+
+
+def test_a_failed_word_logs_its_command_status_and_the_master(c_mailbox_bin: Path) -> None:
+    got = _lite(c_mailbox_bin, "--want-full", "--cfg61", "0x04", "--cfg62", "0x31",
+                "--fail", "read_word:0x8c=0x02")
+    assert got["fail_notes"] == 1
+    assert (got["fail_cmd"], got["fail_rc"], got["fail_sts"]) == (0x8C, -errno.EIO, 0x02)
+    # Read while the refresh still had them armed: port 0, speed 0x03.
+    assert got["fail_regs_ok"] == 1
+    assert (got["fail_cfg"], got["fail_speed"]) == (0x04, 0x03)
+    # Hands-off mode shows the firmware's speed instead.
+    got = _lite(c_mailbox_bin, "--want-full", "--cfg61", "0x04", "--cfg62", "0x31",
+                "--fail", "read_word:0x8c=0x02", "--mux-keep")
+    assert (got["fail_cfg"], got["fail_speed"]) == (0x04, 0x31)
+
+
+def test_a_stuck_start_logs_a_timeout_without_a_status(c_mailbox_bin: Path) -> None:
+    got = _lite(c_mailbox_bin, "--want-full", "--stuck-start")
+    assert got["cpu_valid"] == 0
+    assert got["fail_notes"] == 1
+    # The first word of a full sample is VOUT.
+    assert (got["fail_cmd"], got["fail_rc"], got["fail_sts"]) == (0x8B, -errno.ETIMEDOUT, -1)

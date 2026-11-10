@@ -33,13 +33,20 @@
 	bool vrm_mux_hold;
 	u8 vrm_mux_cfg;
 	u8 vrm_mux_baud;
+	/* This cycle left 0x61/0x62 as found (NCT_VRM_MUX_KEEP_FW). */
+	bool vrm_mux_kept;
+	/* Last 0x61/0x62 pair a save read; vrm_mux_seen once there is one. */
+	bool vrm_mux_seen;
+	u8 vrm_mux_seen_cfg;
+	u8 vrm_mux_seen_baud;
 	int vrm_smbus_page;
 	u8 vrm_vout_mode_cache[2];
 	bool vrm_vout_mode_valid[2];
 	/* One rail slot per PAGE. Written only by nct_vrm_rail_apply. */
 	struct nct_vrm_rail {
 		bool valid;
-		bool hist_init; /* VOUT, VIN, TEMP: seeded together */
+		bool hist_init; /* VOUT, VIN: seeded together */
+		bool temp_hist_init;
 		bool iout_hist_init;
 		bool pout_hist_init;
 		bool iin_hist_init;

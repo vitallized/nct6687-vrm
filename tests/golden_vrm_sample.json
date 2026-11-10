@@ -31,13 +31,13 @@
           "write_byte 0x00 0x00",
           "read_byte 0x00",
           "read_byte 0x20",
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96",
-          "read_word 0x97"
+          "read_word 0x97",
+          "read_word 0x89",
+          "read_word 0x88",
+          "read_word 0x8d"
         ],
         "error": false,
         "millisi": {
@@ -85,13 +85,13 @@
       },
       "expect": {
         "ops": [
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96",
-          "read_word 0x97"
+          "read_word 0x97",
+          "read_word 0x89",
+          "read_word 0x88",
+          "read_word 0x8d"
         ],
         "error": false,
         "millisi": {
@@ -136,13 +136,13 @@
       },
       "expect": {
         "ops": [
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96",
-          "read_word 0x97"
+          "read_word 0x97",
+          "read_word 0x89",
+          "read_word 0x88",
+          "read_word 0x8d"
         ],
         "error": false,
         "millisi": {
@@ -187,13 +187,13 @@
       },
       "expect": {
         "ops": [
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96",
-          "read_word 0x97"
+          "read_word 0x97",
+          "read_word 0x89",
+          "read_word 0x88",
+          "read_word 0x8d"
         ],
         "error": false,
         "millisi": {
@@ -242,13 +242,13 @@
       "expect": {
         "ops": [
           "read_byte 0x20",
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96",
-          "read_word 0x97"
+          "read_word 0x97",
+          "read_word 0x89",
+          "read_word 0x88",
+          "read_word 0x8d"
         ],
         "error": false,
         "millisi": {
@@ -293,13 +293,13 @@
       },
       "expect": {
         "ops": [
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96",
-          "read_word 0x97"
+          "read_word 0x97",
+          "read_word 0x89",
+          "read_word 0x88",
+          "read_word 0x8d"
         ],
         "error": false,
         "millisi": {
@@ -344,13 +344,13 @@
       },
       "expect": {
         "ops": [
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96",
-          "read_word 0x97"
+          "read_word 0x97",
+          "read_word 0x89",
+          "read_word 0x88",
+          "read_word 0x8d"
         ],
         "error": false,
         "millisi": {
@@ -401,13 +401,13 @@
           "write_byte 0x00 0x01",
           "read_byte 0x00",
           "read_byte 0x20",
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96",
-          "read_word 0x97"
+          "read_word 0x97",
+          "read_word 0x89",
+          "read_word 0x88",
+          "read_word 0x8d"
         ],
         "error": false,
         "millisi": {
@@ -555,11 +555,8 @@
       },
       "expect": {
         "ops": [
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c",
-          "read_word 0x89",
           "read_word 0x96"
         ],
         "error": true,
@@ -600,9 +597,7 @@
       },
       "expect": {
         "ops": [
-          "read_word 0x8d",
           "read_word 0x8b",
-          "read_word 0x88",
           "read_word 0x8c"
         ],
         "error": true,

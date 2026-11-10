@@ -226,6 +226,43 @@ def test_vout_vin_temp_still_latch_negative(c_decode_bin: Path) -> None:
     assert r["temp"] == (-5, True, -5, 40000)
 
 
+
+def test_temp_above_200c_is_not_published(c_decode_bin: Path) -> None:
+    # 200 °C is the last published reading; one step above keeps the last one.
+    r = _rail(
+        c_decode_bin,
+        (1234, 12000, 1000, 1000000, 40000, 5610, 101000000),
+        (1234, 12000, 1000, 1000000, 200001, 5610, 101000000),
+    )
+    assert r["noted"] == 1
+    assert r["temp"] == (40000, True, 40000, 40000)
+    r = _rail(c_decode_bin, (1234, 12000, 1000, 1000000, 200000, 5610, 101000000))
+    assert r["noted"] == 0
+    assert r["temp"] == (200000, True, 200000, 200000)
+
+
+def test_first_temp_above_200c_does_not_seed_its_hist(c_decode_bin: Path) -> None:
+    r = _rail(c_decode_bin, (1234, 12000, 1000, 1000000, 1023000, 5610, 101000000))
+    assert r["valid"] is True
+    assert r["temp"][:2] == (0, False)
+    # VOUT and VIN still seed on that sample.
+    assert r["vout"] == (1234, True, 1234, 1234)
+
+
+def _ctrl(c_decode_bin: Path, *samples: int) -> dict[str, int]:
+    out = subprocess.check_output(
+        [str(c_decode_bin), "ctrl_seq", *[str(s) for s in samples]], text=True
+    )
+    return {k: int(v) for k, v in (line.split() for line in out.splitlines())}
+
+
+def test_ctrl_temp_above_200c_keeps_the_last_reading(c_decode_bin: Path) -> None:
+    assert _ctrl(c_decode_bin, 35000, 250000) == {
+        "valid": 1, "cur": 35000, "min": 35000, "max": 35000, "noted": 1,
+    }
+    # Never published: stays invalid, so sensors shows nothing for it.
+    assert _ctrl(c_decode_bin, 250000)["valid"] == 0
+
 def _mos(c_decode_bin: Path, *samples: int) -> tuple[int, int, int]:
     out = subprocess.check_output(
         [str(c_decode_bin), "mos_seq", *[str(s) for s in samples]], text=True
@@ -266,7 +303,7 @@ def test_ctrl_seeds_current_and_tracks_signed_temp(c_decode_bin: Path) -> None:
     for line in out.splitlines():
         key, val = line.split()
         got[key] = int(val)
-    assert got == {"valid": 1, "cur": 34000, "min": 34000, "max": 37000}
+    assert got == {"valid": 1, "cur": 34000, "min": 34000, "max": 37000, "noted": 0}
 
 
 def test_mos_seeds_and_tracks_signed_temp(c_decode_bin: Path) -> None:

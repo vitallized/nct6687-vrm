@@ -16,7 +16,7 @@
 
 static int nct_vrm_neg_notes;
 
-static void nct_vrm_note_negative(int metric, long val)
+static void nct_vrm_note_unpublished(int metric, long val)
 {
 	(void)metric;
 	(void)val;
@@ -451,11 +451,12 @@ int main(int argc, char** argv)
 		long cur = 0, min = 0, max = 0;
 		int i;
 
+		nct_vrm_neg_notes = 0;
 		for (i = 2; i < argc; i++)
 			nct_vrm_ctrl_note(&valid, &init, &cur, &min, &max,
 				strtol(argv[i], NULL, 0));
-		printf("valid %d\ncur %ld\nmin %ld\nmax %ld\n",
-			valid ? 1 : 0, cur, min, max);
+		printf("valid %d\ncur %ld\nmin %ld\nmax %ld\nnoted %d\n",
+			valid ? 1 : 0, cur, min, max, nct_vrm_neg_notes);
 		return 0;
 	}
 	if (argc >= 2 && !strcmp(argv[1], "mos_seq")) {
